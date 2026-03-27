@@ -3,7 +3,7 @@ import Foundation
 import CLibMTP
 
 /// Represents a file or folder on the MTP device
-public struct MTPFileInfo: Identifiable, Hashable {
+public struct MTPFileInfo: Identifiable, Hashable, Sendable {
     public let id: UInt32  // objectId
     public let objectId: UInt32
     public let parentId: UInt32
@@ -51,7 +51,7 @@ public struct MTPFileInfo: Identifiable, Hashable {
 // MARK: - StorageInfo
 
 /// Represents a storage volume on the MTP device
-public struct MTPStorageInfo: Identifiable, Hashable {
+public struct MTPStorageInfo: Identifiable, Hashable, Sendable {
     public let id: UInt32
     public let description: String
     public let volumeIdentifier: String
@@ -75,7 +75,7 @@ public struct MTPStorageInfo: Identifiable, Hashable {
 // MARK: - DeviceInfo
 
 /// Basic device information
-public struct MTPDeviceInfo: Identifiable {
+public struct MTPDeviceInfo: Identifiable, Sendable {
     public let id: String  // serial number
     public let manufacturer: String
     public let model: String
@@ -87,7 +87,7 @@ public struct MTPDeviceInfo: Identifiable {
 // MARK: - Progress
 
 /// Transfer progress for bulk folder operations
-public struct MTPProgressInfo {
+public struct MTPProgressInfo: Sendable {
     public var fileInfo: MTPFileInfo?
     public var activeFileSize: MTPSizeProgress = .init()
     public var bulkFileSize: MTPSizeProgress = .init()
@@ -97,7 +97,7 @@ public struct MTPProgressInfo {
     public var latestSentTime: Date = Date()
 }
 
-public struct MTPSizeProgress {
+public struct MTPSizeProgress: Sendable {
     public var total: Int64 = 0
     public var sent: Int64 = 0
     public var progress: Float = 0
@@ -105,3 +105,21 @@ public struct MTPSizeProgress {
 
 /// Progress callback: return false to cancel
 public typealias MTPProgressCallback = (MTPProgressInfo) -> Bool
+
+// MARK: - Async Transfer Events
+
+/// Events emitted during async file transfers
+public enum MTPTransferEvent: Sendable {
+    /// Progress update with bytes sent and total
+    case progress(sent: Int64, total: Int64)
+    /// Transfer completed successfully (objectId is set for uploads)
+    case completed(objectId: UInt32?)
+}
+
+/// Events emitted during async bulk (folder) transfers
+public enum MTPBulkTransferEvent: Sendable {
+    /// Progress update for the overall bulk operation
+    case progress(MTPProgressInfo)
+    /// Bulk transfer completed
+    case completed
+}

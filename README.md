@@ -116,6 +116,64 @@ let folderId = try device.createFolder(
 try device.deleteObject(objectId: file.objectId)
 ```
 
+### Async/Await API
+
+All device operations have native `async throws` variants that run off the main thread:
+
+```swift
+// Async device detection and listing
+let devices = try await MTPDevice.detectDevicesAsync()
+let device = devices[0]
+let storages = try await device.getStoragesAsync()
+let files = try await device.listDirectoryAsync(
+    storageId: storages[0].id,
+    parentId: MTPParentObjectID,
+    parentPath: "/"
+)
+
+// Async upload with progress closure
+let objectId = try await device.uploadFile(
+    localPath: "/Users/me/photo.jpg",
+    parentId: MTPParentObjectID,
+    storageId: storages[0].id
+) { sent, total in
+    print("Progress: \(sent)/\(total)")
+}
+
+// Async download with progress closure
+try await device.downloadFile(
+    objectId: file.objectId,
+    destinationPath: "/Users/me/Downloads/photo.jpg"
+) { sent, total in
+    print("Progress: \(sent)/\(total)")
+}
+```
+
+#### Stream-Based Progress
+
+For SwiftUI or reactive patterns, use `AsyncThrowingStream` variants:
+
+```swift
+// Stream-based upload with for-await
+for try await event in device.uploadAsync(
+    localPath: "/Users/me/photo.jpg",
+    parentId: MTPParentObjectID,
+    storageId: storage.id
+) {
+    switch event {
+    case .progress(let sent, let total):
+        print("\(sent)/\(total)")
+    case .completed(let objectId):
+        print("Done! ID: \(objectId ?? 0)")
+    }
+}
+
+// Stream-based recursive directory walk
+for try await file in device.walkAsync(storageId: storage.id, parentId: MTPParentObjectID) {
+    print("\(file.isDir ? "📁" : "📄") \(file.name)")
+}
+```
+
 ### SwiftUI — Using MTPManager
 
 ```swift
@@ -165,8 +223,9 @@ MTPKit/
 ├── MTPTypes.swift       — MTPFileInfo, MTPStorageInfo, MTPDeviceInfo, progress types
 ├── MTPError.swift       — Error enum with localized descriptions
 ├── MTPUtils.swift       — Path utilities, file extension parsing
-├── MTPDevice.swift      — Core wrapper over libmtp C functions
-└── MTPManager.swift     — SwiftUI ObservableObject with navigation & transfer management
+├── MTPDevice.swift       — Core wrapper over libmtp C functions
+├── MTPDevice+Async.swift — Async/await extensions with AsyncThrowingStream support
+└── MTPManager.swift      — SwiftUI ObservableObject with navigation & transfer management
 ```
 
 ## Running Tests
@@ -183,7 +242,7 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 
 ### High Impact
 
-- [ ] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
+- [x] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
 - [ ] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
 - [ ] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
 - [ ] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`

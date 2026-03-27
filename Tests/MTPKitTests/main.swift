@@ -516,6 +516,92 @@ test("TransferProgress zero total") {
     try expect(tp.percentage, 0.0)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── Async Types ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("MTPTransferEvent progress case") {
+    let event = MTPTransferEvent.progress(sent: 500, total: 1000)
+    if case .progress(let sent, let total) = event {
+        try expect(sent, Int64(500))
+        try expect(total, Int64(1000))
+    } else {
+        throw TestError("Expected .progress case")
+    }
+}
+
+test("MTPTransferEvent completed case with objectId") {
+    let event = MTPTransferEvent.completed(objectId: 42)
+    if case .completed(let objId) = event {
+        try expect(objId, UInt32(42))
+    } else {
+        throw TestError("Expected .completed case")
+    }
+}
+
+test("MTPTransferEvent completed case with nil objectId") {
+    let event = MTPTransferEvent.completed(objectId: nil)
+    if case .completed(let objId) = event {
+        try expectNil(objId)
+    } else {
+        throw TestError("Expected .completed case")
+    }
+}
+
+test("MTPBulkTransferEvent progress case") {
+    var pInfo = MTPProgressInfo()
+    pInfo.totalFiles = 10
+    pInfo.filesSent = 5
+    let event = MTPBulkTransferEvent.progress(pInfo)
+    if case .progress(let info) = event {
+        try expect(info.totalFiles, Int64(10))
+        try expect(info.filesSent, Int64(5))
+    } else {
+        throw TestError("Expected .progress case")
+    }
+}
+
+test("MTPBulkTransferEvent completed case") {
+    let event = MTPBulkTransferEvent.completed
+    if case .completed = event {
+        // pass
+    } else {
+        throw TestError("Expected .completed case")
+    }
+}
+
+test("MTPFileInfo is Sendable") {
+    let file = makeFileInfo()
+    // Verify it can be passed to a Sendable closure
+    let closure: @Sendable () -> String = { file.name }
+    try expect(closure(), "test.txt")
+}
+
+test("MTPStorageInfo is Sendable") {
+    let storage = makeStorage()
+    let closure: @Sendable () -> UInt32 = { storage.id }
+    try expect(closure(), UInt32(1))
+}
+
+test("MTPDeviceInfo is Sendable") {
+    let info = MTPDeviceInfo(id: "123", manufacturer: "Samsung", model: "Galaxy", serialNumber: "123", deviceVersion: "1.0", friendlyName: "Phone")
+    let closure: @Sendable () -> String = { info.manufacturer }
+    try expect(closure(), "Samsung")
+}
+
+test("MTPProgressInfo is Sendable") {
+    var pInfo = MTPProgressInfo()
+    pInfo.totalFiles = 5
+    let closure: @Sendable () -> Int64 = { pInfo.totalFiles }
+    try expect(closure(), Int64(5))
+}
+
+test("MTPSizeProgress is Sendable") {
+    let sp = MTPSizeProgress(total: 100, sent: 50, progress: 50.0)
+    let closure: @Sendable () -> Int64 = { sp.total }
+    try expect(closure(), Int64(100))
+}
+
 // ============================================================================
 // SUMMARY
 // ============================================================================

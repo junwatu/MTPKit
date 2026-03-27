@@ -84,35 +84,29 @@ public final class MTPManager: ObservableObject {
         errorMessage = nil
         isLoading = true
 
-        Task.detached { [weak self] in
+        Task { [weak self] in
             if !MTPManager.initialized {
                 MTPDevice.initialize()
                 MTPManager.initialized = true
             }
 
             do {
-                let detectedDevices = try MTPDevice.detectDevices()
+                let detectedDevices = try await MTPDevice.detectDevicesAsync()
 
-                await MainActor.run {
-                    self?.devices = detectedDevices
-                    self?.selectedDevice = detectedDevices.first
-                    self?.isConnected = true
-                    self?.isLoading = false
-                }
+                self?.devices = detectedDevices
+                self?.selectedDevice = detectedDevices.first
+                self?.isConnected = true
+                self?.isLoading = false
 
                 if let device = detectedDevices.first {
-                    let info = device.getDeviceInfo()
-                    await MainActor.run {
-                        self?.deviceInfo = info
-                    }
+                    let info = await device.getDeviceInfoAsync()
+                    self?.deviceInfo = info
                     await self?.fetchStorages()
                 }
             } catch {
-                await MainActor.run {
-                    self?.errorMessage = error.localizedDescription
-                    self?.isConnected = false
-                    self?.isLoading = false
-                }
+                self?.errorMessage = error.localizedDescription
+                self?.isConnected = false
+                self?.isLoading = false
             }
         }
     }
@@ -138,21 +132,17 @@ public final class MTPManager: ObservableObject {
         guard let device = selectedDevice else { return }
 
         do {
-            let storageList = try device.getStorages()
-            await MainActor.run {
-                self.storages = storageList
-                if self.selectedStorage == nil {
-                    self.selectedStorage = storageList.first
-                }
+            let storageList = try await device.getStoragesAsync()
+            self.storages = storageList
+            if self.selectedStorage == nil {
+                self.selectedStorage = storageList.first
             }
             // Auto-browse root
             if let storage = storageList.first {
                 await browse(storageId: storage.id, parentId: MTPParentObjectID, path: "/", name: "/")
             }
         } catch {
-            await MainActor.run {
-                self.errorMessage = error.localizedDescription
-            }
+            self.errorMessage = error.localizedDescription
         }
     }
 
@@ -161,27 +151,21 @@ public final class MTPManager: ObservableObject {
     public func browse(storageId: UInt32, parentId: UInt32, path: String, name: String) async {
         guard let device = selectedDevice else { return }
 
-        await MainActor.run {
-            self.isLoading = true
-        }
+        self.isLoading = true
 
         do {
-            let files = try device.listDirectory(
+            let files = try await device.listDirectoryAsync(
                 storageId: storageId,
                 parentId: parentId,
                 parentPath: path
             )
-            await MainActor.run {
-                self.currentFiles = files
-                self.currentPath = path
-                self.currentParentId = parentId
-                self.isLoading = false
-            }
+            self.currentFiles = files
+            self.currentPath = path
+            self.currentParentId = parentId
+            self.isLoading = false
         } catch {
-            await MainActor.run {
-                self.errorMessage = error.localizedDescription
-                self.isLoading = false
-            }
+            self.errorMessage = error.localizedDescription
+            self.isLoading = false
         }
     }
 
@@ -235,13 +219,13 @@ public final class MTPManager: ObservableObject {
         )
 
         let fileName = file.name
-        Task.detached { [weak self] in
+        Task { [weak self] in
             do {
                 if file.isDir {
                     try FileManager.default.createDirectory(
                         atPath: destPath, withIntermediateDirectories: true
                     )
-                    try device.downloadFolder(
+                    try await device.downloadFolder(
                         storageId: file.storageId,
                         fileInfo: file,
                         destinationPath: destPath
@@ -252,10 +236,9 @@ public final class MTPManager: ObservableObject {
                             total: progress.bulkFileSize.total,
                             isUploading: false
                         )
-                        return true
                     }
                 } else {
-                    try device.downloadFileWithTimestamp(
+                    try await device.downloadFileWithTimestamp(
                         fileInfo: file,
                         destinationPath: destPath
                     ) { sent, total in
@@ -264,18 +247,13 @@ public final class MTPManager: ObservableObject {
                             sent: sent, total: total,
                             isUploading: false
                         )
-                        return true
                     }
                 }
 
-                await MainActor.run {
-                    self?.transferProgress = nil
-                }
+                self?.transferProgress = nil
             } catch {
-                await MainActor.run {
-                    self?.errorMessage = "Download failed: \(error.localizedDescription)"
-                    self?.transferProgress = nil
-                }
+                self?.errorMessage = "Download failed: \(error.localizedDescription)"
+                self?.transferProgress = nil
             }
         }
     }
@@ -327,18 +305,18 @@ public final class MTPManager: ObservableObject {
                     } else {
                         let fileSize = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
                         let baseSent = totalSent
-                        let _ = try device.uploadFile(
+                        try await device.uploadFile(
                             localPath: url.path,
                             parentId: parentId,
-                            storageId: storage.id
-                        ) { sent, _ in
-                            MTPManager.updateProgress(
-                                on: self, fileName: fileName,
-                                sent: baseSent + sent, total: totalSize,
-                                isUploading: true
-                            )
-                            return true
-                        }
+                            storageId: storage.id,
+                            onProgress: { sent, _ in
+                                MTPManager.updateProgress(
+                                    on: self, fileName: fileName,
+                                    sent: baseSent + sent, total: totalSize,
+                                    isUploading: true
+                                )
+                            }
+                        )
                         totalSent += fileSize
                     }
                 } catch {
@@ -444,18 +422,16 @@ public final class MTPManager: ObservableObject {
     public func deleteFile(_ file: MTPFileInfo) {
         guard let device = selectedDevice, let storage = selectedStorage else { return }
 
-        Task.detached { [weak self] in
+        Task { [weak self] in
             do {
-                try device.deleteObject(objectId: file.objectId)
+                try await device.deleteObject(objectId: file.objectId)
 
                 // Refresh
-                let path = await self?.currentPath ?? "/"
+                let path = self?.currentPath ?? "/"
                 let parentId = file.parentId
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                await MainActor.run {
-                    self?.errorMessage = "Delete failed: \(error.localizedDescription)"
-                }
+                self?.errorMessage = "Delete failed: \(error.localizedDescription)"
             }
         }
     }
@@ -465,17 +441,15 @@ public final class MTPManager: ObservableObject {
     public func createFolder(name: String, parentId: UInt32) {
         guard let device = selectedDevice, let storage = selectedStorage else { return }
 
-        Task.detached { [weak self] in
+        Task { [weak self] in
             do {
-                let _ = try device.createFolder(name: name, parentId: parentId, storageId: storage.id)
+                try await device.createFolder(name: name, parentId: parentId, storageId: storage.id)
 
                 // Refresh
-                let path = await self?.currentPath ?? "/"
+                let path = self?.currentPath ?? "/"
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                await MainActor.run {
-                    self?.errorMessage = "Create folder failed: \(error.localizedDescription)"
-                }
+                self?.errorMessage = "Create folder failed: \(error.localizedDescription)"
             }
         }
     }
