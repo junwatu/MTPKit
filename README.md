@@ -11,6 +11,8 @@ A Swift library for communicating with Android devices over **MTP (Media Transfe
 - **Samsung support** — uncached mode, storage retry, root parent ID mapping, >4GB file handling
 - **SwiftUI ready** — includes `MTPManager`, an `@MainActor ObservableObject` with `@Published` state
 - **Progress tracking** — throttled UI updates at ~30fps via `DispatchQueue.main.async`
+- **Async/await native API** — `async throws` methods and `AsyncThrowingStream` progress streams for modern Swift concurrency
+- **Sendable types** — all model types conform to `Sendable` for safe cross-isolation usage
 
 ## Requirements
 
@@ -262,6 +264,21 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 - [ ] **CI with GitHub Actions** — Automated build and test pipeline on macOS runners
 - [ ] **Swift 6 strict concurrency** — Full `Sendable` compliance and data-race safety
 - [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
+
+## Changelog
+
+### v1.1.0 — 2026-03-27
+
+- **Async/await native API** — All `MTPDevice` methods now have `async throws` counterparts that run off the main thread via `Task.detached`, eliminating the need for manual `Task.detached` wrappers in calling code.
+- **`AsyncThrowingStream` progress streams** — `downloadAsync()`, `uploadAsync()`, `downloadFolderAsync()`, and `walkAsync()` return `AsyncThrowingStream` for reactive `for try await` consumption.
+- **`MTPTransferEvent` & `MTPBulkTransferEvent`** — New enums for stream-based progress reporting with `.progress(sent:total:)` and `.completed(objectId:)` cases.
+- **Sendable conformance** — `MTPFileInfo`, `MTPStorageInfo`, `MTPDeviceInfo`, `MTPProgressInfo`, and `MTPSizeProgress` now conform to `Sendable` for safe cross-isolation usage.
+- **MTPManager modernized** — `connect()`, `fetchStorages()`, `browse()`, `deleteFile()`, and `createFolder()` now use async device APIs directly, removing `MainActor.run {}` boilerplate.
+- **10 new tests** (60 → 70 total) covering async event types and Sendable conformance.
+
+### v1.0.0 — 2026-03-26
+
+- Initial release with `MTPDevice` (sync API), `MTPManager` (SwiftUI), Samsung workarounds, and progress tracking.
 
 ## Attribution
 
