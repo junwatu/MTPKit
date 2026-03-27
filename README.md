@@ -177,6 +177,33 @@ swift run MTPKitTests
 
 Tests run as an executable target (no Xcode/XCTest required).
 
+## Roadmap
+
+Planned enhancements for MTPKit. Check marks indicate implemented features.
+
+### High Impact
+
+- [ ] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
+- [ ] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
+- [ ] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
+- [ ] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`
+
+### Medium Impact
+
+- [ ] **Swift Actor instead of NSLock** — Replace manual locking with a `MTPDeviceActor` for safer concurrency
+- [ ] **Thumbnail support** — Retrieve device-generated thumbnails via `LIBMTP_Get_Thumbnail`
+- [ ] **Storage refresh after transfers** — Auto-refresh storage info (free space) after upload/download/delete
+- [ ] **Batch delete** — Delete multiple objects in a single call with rollback on partial failure
+- [ ] **DocC documentation** — Add full DocC-compatible documentation with code examples
+
+### Nice to Have
+
+- [ ] **Reconnection handling** — Auto-reconnect when a device is temporarily disconnected
+- [ ] **File type mapping** — Map file extensions to MTP file types for better device compatibility
+- [ ] **CI with GitHub Actions** — Automated build and test pipeline on macOS runners
+- [ ] **Swift 6 strict concurrency** — Full `Sendable` compliance and data-race safety
+- [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
+
 ## Attribution
 
 MTPKit is a **Swift port** of [go-mtpx](https://github.com/ganeshrvel/go-mtpx) by [@ganeshrvel](https://github.com/ganeshrvel), a Go library for MTP operations that wraps [go-mtpfs](https://github.com/hanwen/go-mtpfs). The core logic — path handling, device operations, Samsung workarounds, and progress tracking — was ported from Go to Swift with native C interop over [libmtp](https://github.com/libmtp/libmtp).
