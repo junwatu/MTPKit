@@ -13,6 +13,7 @@ A Swift library for communicating with Android devices over **MTP (Media Transfe
 - **Progress tracking** — throttled UI updates at ~30fps via `DispatchQueue.main.async`
 - **Async/await native API** — `async throws` methods and `AsyncThrowingStream` progress streams for modern Swift concurrency
 - **Sendable types** — all model types conform to `Sendable` for safe cross-isolation usage
+- **USB hot-plug monitoring** — real-time device connect/disconnect detection via IOKit with debouncing and `AsyncStream` support
 
 ## Requirements
 
@@ -176,6 +177,34 @@ for try await file in device.walkAsync(storageId: storage.id, parentId: MTPParen
 }
 ```
 
+### USB Hot-Plug Monitoring
+
+Detect USB device connect/disconnect events in real-time:
+
+```swift
+// Callback-based
+let monitor = USBDeviceMonitor()
+monitor.startMonitoring { event in
+    switch event {
+    case .deviceConnected:
+        print("USB device plugged in")
+    case .deviceDisconnected:
+        print("USB device removed")
+    }
+}
+
+// AsyncStream-based
+let monitor = USBDeviceMonitor()
+for await event in monitor.events() {
+    print("USB event: \(event)")
+}
+
+// Via MTPManager (auto-connect/disconnect)
+let manager = MTPManager()
+manager.startHotPlug()  // auto-detects MTP devices on USB insertion
+// manager.stopHotPlug() to disable
+```
+
 ### SwiftUI — Using MTPManager
 
 ```swift
@@ -226,8 +255,9 @@ MTPKit/
 ├── MTPError.swift       — Error enum with localized descriptions
 ├── MTPUtils.swift       — Path utilities, file extension parsing
 ├── MTPDevice.swift       — Core wrapper over libmtp C functions
-├── MTPDevice+Async.swift — Async/await extensions with AsyncThrowingStream support
-└── MTPManager.swift      — SwiftUI ObservableObject with navigation & transfer management
+├── MTPDevice+Async.swift  — Async/await extensions with AsyncThrowingStream support
+├── USBDeviceMonitor.swift — USB hot-plug monitoring via IOKit notifications
+└── MTPManager.swift       — SwiftUI ObservableObject with navigation, transfer & hot-plug management
 ```
 
 ## Running Tests
@@ -245,7 +275,7 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 ### High Impact
 
 - [x] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
-- [ ] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
+- [x] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
 - [ ] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
 - [ ] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`
 
@@ -266,6 +296,14 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 - [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
 
 ## Changelog
+
+### v1.2.0 — 2026-03-27
+
+- **USB hot-plug monitoring** — New `USBDeviceMonitor` class detects USB device connect/disconnect in real-time via IOKit notifications on a dedicated background thread.
+- **Debounced events** — Configurable `debounceInterval` (default 0.5s) coalesces rapid USB events from composite devices.
+- **AsyncStream support** — `monitor.events()` returns an `AsyncStream<Event>` for `for await` consumption.
+- **MTPManager integration** — `startHotPlug()`/`stopHotPlug()` auto-connect on USB insertion and auto-disconnect on removal.
+- **14 new tests** (70 → 84 total) covering monitor lifecycle, thread safety, event types, and manager integration.
 
 ### v1.1.0 — 2026-03-27
 

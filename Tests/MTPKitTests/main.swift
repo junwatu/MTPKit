@@ -602,6 +602,109 @@ test("MTPSizeProgress is Sendable") {
     try expect(closure(), Int64(100))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── USBDeviceMonitor ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("USBDeviceMonitor initial state") {
+    let monitor = USBDeviceMonitor()
+    try expectFalse(monitor.monitoring)
+}
+
+test("USBDeviceMonitor start sets monitoring true") {
+    let monitor = USBDeviceMonitor()
+    monitor.startMonitoring { _ in }
+    // Give the background thread a moment to start
+    Thread.sleep(forTimeInterval: 0.1)
+    try expectTrue(monitor.monitoring)
+    monitor.stopMonitoring()
+}
+
+test("USBDeviceMonitor stop sets monitoring false") {
+    let monitor = USBDeviceMonitor()
+    monitor.startMonitoring { _ in }
+    Thread.sleep(forTimeInterval: 0.1)
+    monitor.stopMonitoring()
+    try expectFalse(monitor.monitoring)
+}
+
+test("USBDeviceMonitor double start is safe") {
+    let monitor = USBDeviceMonitor()
+    monitor.startMonitoring { _ in }
+    monitor.startMonitoring { _ in }  // should not crash
+    Thread.sleep(forTimeInterval: 0.1)
+    try expectTrue(monitor.monitoring)
+    monitor.stopMonitoring()
+}
+
+test("USBDeviceMonitor double stop is safe") {
+    let monitor = USBDeviceMonitor()
+    monitor.startMonitoring { _ in }
+    Thread.sleep(forTimeInterval: 0.1)
+    monitor.stopMonitoring()
+    monitor.stopMonitoring()  // should not crash
+    try expectFalse(monitor.monitoring)
+}
+
+test("USBDeviceMonitor deinit stops monitoring") {
+    var monitor: USBDeviceMonitor? = USBDeviceMonitor()
+    monitor?.startMonitoring { _ in }
+    Thread.sleep(forTimeInterval: 0.1)
+    monitor = nil  // should not crash, deinit calls stopMonitoring
+    try expectTrue(true)  // if we got here, no crash
+}
+
+test("USBDeviceMonitor.Event descriptions") {
+    let connect = USBDeviceMonitor.Event.deviceConnected
+    let disconnect = USBDeviceMonitor.Event.deviceDisconnected
+    try expect(connect.description, "deviceConnected")
+    try expect(disconnect.description, "deviceDisconnected")
+}
+
+test("USBDeviceMonitor.Event equality") {
+    try expectTrue(USBDeviceMonitor.Event.deviceConnected == .deviceConnected)
+    try expectTrue(USBDeviceMonitor.Event.deviceDisconnected == .deviceDisconnected)
+    try expectFalse(USBDeviceMonitor.Event.deviceConnected == .deviceDisconnected)
+}
+
+test("USBDeviceMonitor debounceInterval default") {
+    let monitor = USBDeviceMonitor()
+    try expectTrue(abs(monitor.debounceInterval - 0.5) < 0.01)
+}
+
+test("USBDeviceMonitor debounceInterval configurable") {
+    let monitor = USBDeviceMonitor()
+    monitor.debounceInterval = 1.0
+    try expectTrue(abs(monitor.debounceInterval - 1.0) < 0.01)
+}
+
+testOnMain("MTPManager hot-plug initial state") {
+    let mgr = MTPManager()
+    try expectFalse(mgr.isHotPlugEnabled)
+}
+
+testOnMain("MTPManager startHotPlug enables monitoring") {
+    let mgr = MTPManager()
+    mgr.startHotPlug()
+    try expectTrue(mgr.isHotPlugEnabled)
+    mgr.stopHotPlug()
+}
+
+testOnMain("MTPManager stopHotPlug disables monitoring") {
+    let mgr = MTPManager()
+    mgr.startHotPlug()
+    mgr.stopHotPlug()
+    try expectFalse(mgr.isHotPlugEnabled)
+}
+
+testOnMain("MTPManager double startHotPlug is safe") {
+    let mgr = MTPManager()
+    mgr.startHotPlug()
+    mgr.startHotPlug()  // should not crash
+    try expectTrue(mgr.isHotPlugEnabled)
+    mgr.stopHotPlug()
+}
+
 // ============================================================================
 // SUMMARY
 // ============================================================================

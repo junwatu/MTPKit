@@ -20,6 +20,10 @@ public final class MTPManager: ObservableObject {
     @Published public var pathHistory: [PathEntry] = []
     @Published public var errorMessage: String?
     @Published public var transferProgress: TransferProgress?
+    @Published public var isHotPlugEnabled = false
+
+    /// The USB hot-plug monitor instance
+    private let usbMonitor = USBDeviceMonitor()
 
     public struct PathEntry: Equatable {
         public let path: String
@@ -53,6 +57,52 @@ public final class MTPManager: ObservableObject {
     private nonisolated(unsafe) static var lastProgressUpdate: CFAbsoluteTime = 0
 
     public init() {}
+
+    // MARK: - USB Hot-Plug Monitoring
+
+    /// Start monitoring USB device connect/disconnect events.
+    ///
+    /// When a USB device is connected, the manager will automatically attempt
+    /// to detect and connect to MTP devices. When a device is disconnected
+    /// and we have an active connection, the manager will disconnect.
+    public func startHotPlug() {
+        guard !isHotPlugEnabled else { return }
+        isHotPlugEnabled = true
+
+        usbMonitor.startMonitoring { [weak self] event in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch event {
+                case .deviceConnected:
+                    // Only auto-connect if not already connected
+                    if !self.isConnected {
+                        self.connect()
+                    }
+                case .deviceDisconnected:
+                    // Only auto-disconnect if currently connected
+                    if self.isConnected {
+                        // Try to re-detect; if no devices found, disconnect
+                        Task { [weak self] in
+                            do {
+                                let devices = try await MTPDevice.detectDevicesAsync()
+                                if devices.isEmpty {
+                                    self?.disconnect()
+                                }
+                            } catch {
+                                self?.disconnect()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop monitoring USB device events.
+    public func stopHotPlug() {
+        usbMonitor.stopMonitoring()
+        isHotPlugEnabled = false
+    }
 
     // MARK: - Progress Helper
 
