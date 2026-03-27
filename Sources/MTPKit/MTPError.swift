@@ -13,6 +13,7 @@ public enum MTPError: Error, LocalizedError, Equatable {
     case sendObjectError(String)
     case noDevicesFound
     case deviceOpenFailed(String)
+    case cancelled
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,7 @@ public enum MTPError: Error, LocalizedError, Equatable {
         case .noDevicesFound:
             return "No MTP devices found. Make sure your Android device is connected via USB and set to 'File transfer / MTP' mode."
         case .deviceOpenFailed(let msg): return "Failed to open device: \(msg)"
+        case .cancelled: return "Transfer cancelled"
         }
     }
 }

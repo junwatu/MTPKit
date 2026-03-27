@@ -202,7 +202,11 @@ public final class MTPDevice: @unchecked Sendable {
             guard let ctx = ctx else { return 0 }
             let context = Unmanaged<ProgressContext>.fromOpaque(ctx).takeUnretainedValue()
             if let cb = context.callback {
-                return cb(Int64(sent), Int64(total)) ? 0 : 1
+                let shouldContinue = cb(Int64(sent), Int64(total))
+                if !shouldContinue {
+                    context.wasCancelled = true
+                    return 1
+                }
             }
             return 0
         } : nil
@@ -216,6 +220,11 @@ public final class MTPDevice: @unchecked Sendable {
         )
 
         if ret != 0 {
+            if context.wasCancelled {
+                // Clean up partial download
+                try? FileManager.default.removeItem(atPath: destinationPath)
+                throw MTPError.cancelled
+            }
             let errMsg = drainErrorStack(device) ?? "Unknown download error"
             throw MTPError.fileTransferError(errMsg)
         }
@@ -280,7 +289,11 @@ public final class MTPDevice: @unchecked Sendable {
             guard let ctx = ctx else { return 0 }
             let context = Unmanaged<ProgressContext>.fromOpaque(ctx).takeUnretainedValue()
             if let cb = context.callback {
-                return cb(Int64(sent), Int64(total)) ? 0 : 1
+                let shouldContinue = cb(Int64(sent), Int64(total))
+                if !shouldContinue {
+                    context.wasCancelled = true
+                    return 1
+                }
             }
             return 0
         } : nil
@@ -294,6 +307,9 @@ public final class MTPDevice: @unchecked Sendable {
         )
 
         if ret != 0 {
+            if context.wasCancelled {
+                throw MTPError.cancelled
+            }
             let errMsg = drainErrorStack(device) ?? "Unknown upload error"
             throw MTPError.sendObjectError(errMsg)
         }
@@ -474,6 +490,7 @@ public final class MTPDevice: @unchecked Sendable {
 /// Context object for C callback trampolines
 private final class ProgressContext {
     let callback: ((Int64, Int64) -> Bool)?
+    var wasCancelled = false
     init(callback: ((Int64, Int64) -> Bool)?) {
         self.callback = callback
     }

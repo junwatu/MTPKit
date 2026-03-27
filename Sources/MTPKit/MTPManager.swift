@@ -20,7 +20,14 @@ public final class MTPManager: ObservableObject {
     @Published public var pathHistory: [PathEntry] = []
     @Published public var errorMessage: String?
     @Published public var transferProgress: TransferProgress?
+    @Published public var isTransferring = false
     @Published public var isHotPlugEnabled = false
+
+    /// The currently active transfer task (download or upload)
+    private var activeTransferTask: Task<Void, Never>?
+
+    /// Cancellation token shared with the active transfer
+    private nonisolated(unsafe) var transferCancellation: MTPCancellationToken?
 
     /// The USB hot-plug monitor instance
     private let usbMonitor = USBDeviceMonitor()
@@ -104,6 +111,21 @@ public final class MTPManager: ObservableObject {
         isHotPlugEnabled = false
     }
 
+    // MARK: - Transfer Cancellation
+
+    /// Cancel the currently active upload or download transfer.
+    ///
+    /// The transfer will stop at the next progress callback (~30fps granularity).
+    /// Partial downloads are cleaned up automatically.
+    public func cancelTransfer() {
+        transferCancellation?.cancel()
+        activeTransferTask?.cancel()
+        activeTransferTask = nil
+        transferCancellation = nil
+        transferProgress = nil
+        isTransferring = false
+    }
+
     // MARK: - Progress Helper
 
     /// Update transfer progress on the main thread, throttled to ~30fps.
@@ -162,6 +184,8 @@ public final class MTPManager: ObservableObject {
     }
 
     public func disconnect() {
+        // Cancel any active transfer before disconnecting
+        cancelTransfer()
         devices = []
         selectedDevice = nil
         deviceInfo = nil
@@ -173,7 +197,6 @@ public final class MTPManager: ObservableObject {
         pathHistory = []
         isConnected = false
         errorMessage = nil
-        transferProgress = nil
     }
 
     // MARK: - Fetch Storages
@@ -262,14 +285,20 @@ public final class MTPManager: ObservableObject {
     public func downloadFile(file: MTPFileInfo, to destinationURL: URL) {
         guard let device = selectedDevice else { return }
 
+        // Cancel any existing transfer
+        cancelTransfer()
+
         let destPath = destinationURL.appendingPathComponent(file.name).path
+        let cancellation = MTPCancellationToken()
+        self.transferCancellation = cancellation
 
         transferProgress = TransferProgress(
             fileName: file.name, sent: 0, total: file.size, isUploading: false
         )
+        isTransferring = true
 
         let fileName = file.name
-        Task { [weak self] in
+        activeTransferTask = Task { [weak self] in
             do {
                 if file.isDir {
                     try FileManager.default.createDirectory(
@@ -280,6 +309,7 @@ public final class MTPManager: ObservableObject {
                         fileInfo: file,
                         destinationPath: destPath
                     ) { progress in
+                        if cancellation.isCancelled { return }
                         MTPManager.updateProgress(
                             on: self, fileName: fileName,
                             sent: progress.bulkFileSize.sent,
@@ -292,6 +322,7 @@ public final class MTPManager: ObservableObject {
                         fileInfo: file,
                         destinationPath: destPath
                     ) { sent, total in
+                        if cancellation.isCancelled { return }
                         MTPManager.updateProgress(
                             on: self, fileName: fileName,
                             sent: sent, total: total,
@@ -301,9 +332,15 @@ public final class MTPManager: ObservableObject {
                 }
 
                 self?.transferProgress = nil
+                self?.isTransferring = false
+            } catch let error as MTPError where error == .cancelled {
+                self?.transferProgress = nil
+                self?.isTransferring = false
+                // Cancelled — no error message
             } catch {
                 self?.errorMessage = "Download failed: \(error.localizedDescription)"
                 self?.transferProgress = nil
+                self?.isTransferring = false
             }
         }
     }
@@ -313,90 +350,109 @@ public final class MTPManager: ObservableObject {
     public func uploadFiles(urls: [URL], parentId: UInt32) {
         guard let device = selectedDevice, let storage = selectedStorage else { return }
 
-        Task.detached { [weak self] in
-            // Pre-calculate total size for all files
-            let fm = FileManager.default
-            var totalSize: Int64 = 0
-            var totalSent: Int64 = 0
+        // Cancel any existing transfer
+        cancelTransfer()
 
-            for url in urls {
-                var isDir: ObjCBool = false
-                fm.fileExists(atPath: url.path, isDirectory: &isDir)
-                if isDir.boolValue {
-                    totalSize += Self.calculateDirectorySize(at: url.path)
-                } else {
-                    totalSize += (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-                }
-            }
+        let cancellation = MTPCancellationToken()
+        self.transferCancellation = cancellation
+        isTransferring = true
 
-            for url in urls {
-                let fileName = url.lastPathComponent
+        activeTransferTask = Task { [weak self] in
+            await Task.detached { [weak self] in
+                // Pre-calculate total size for all files
+                let fm = FileManager.default
+                var totalSize: Int64 = 0
+                var totalSent: Int64 = 0
 
-                MTPManager.updateProgress(
-                    on: self, fileName: fileName,
-                    sent: totalSent, total: totalSize,
-                    isUploading: true, force: true
-                )
-
-                do {
+                for url in urls {
                     var isDir: ObjCBool = false
                     fm.fileExists(atPath: url.path, isDirectory: &isDir)
-
                     if isDir.boolValue {
-                        try Self.uploadFolderWithProgress(
-                            device: device,
-                            localPath: url.path,
-                            parentId: parentId,
-                            storageId: storage.id,
-                            manager: self,
-                            totalSize: totalSize,
-                            totalSent: &totalSent
-                        )
+                        totalSize += Self.calculateDirectorySize(at: url.path)
                     } else {
-                        let fileSize = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
-                        let baseSent = totalSent
-                        try await device.uploadFile(
-                            localPath: url.path,
-                            parentId: parentId,
-                            storageId: storage.id,
-                            onProgress: { sent, _ in
+                        totalSize += (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+                    }
+                }
+
+                for url in urls {
+                    // Check cancellation between files
+                    if cancellation.isCancelled { break }
+
+                    let fileName = url.lastPathComponent
+
+                    MTPManager.updateProgress(
+                        on: self, fileName: fileName,
+                        sent: totalSent, total: totalSize,
+                        isUploading: true, force: true
+                    )
+
+                    do {
+                        var isDir: ObjCBool = false
+                        fm.fileExists(atPath: url.path, isDirectory: &isDir)
+
+                        if isDir.boolValue {
+                            try Self.uploadFolderWithProgress(
+                                device: device,
+                                localPath: url.path,
+                                parentId: parentId,
+                                storageId: storage.id,
+                                manager: self,
+                                totalSize: totalSize,
+                                totalSent: &totalSent,
+                                cancellation: cancellation
+                            )
+                        } else {
+                            let fileSize = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+                            let baseSent = totalSent
+                            let _ = try device.uploadFile(
+                                localPath: url.path,
+                                parentId: parentId,
+                                storageId: storage.id
+                            ) { sent, _ in
+                                if cancellation.isCancelled { return false }
                                 MTPManager.updateProgress(
                                     on: self, fileName: fileName,
                                     sent: baseSent + sent, total: totalSize,
                                     isUploading: true
                                 )
+                                return true
                             }
-                        )
-                        totalSent += fileSize
-                    }
-                } catch {
-                    await MainActor.run {
-                        self?.errorMessage = "Upload failed for \(fileName): \(error.localizedDescription)"
+                            totalSent += fileSize
+                        }
+                    } catch let error as MTPError where error == .cancelled {
+                        break  // Cancelled — exit loop cleanly
+                    } catch {
+                        await MainActor.run {
+                            self?.errorMessage = "Upload failed for \(fileName): \(error.localizedDescription)"
+                        }
                     }
                 }
-            }
 
-            // Force final update before clearing
-            MTPManager.updateProgress(
-                on: self, fileName: "",
-                sent: totalSize, total: totalSize,
-                isUploading: true, force: true
-            )
+                if !cancellation.isCancelled {
+                    // Force final update before clearing
+                    MTPManager.updateProgress(
+                        on: self, fileName: "",
+                        sent: totalSize, total: totalSize,
+                        isUploading: true, force: true
+                    )
+                }
 
-            await MainActor.run {
-                self?.transferProgress = nil
-            }
+                await MainActor.run {
+                    self?.transferProgress = nil
+                    self?.isTransferring = false
+                }
 
-            // Refresh current directory after upload
-            if let storage = await self?.selectedStorage {
-                let parentId = parentId
-                let path = await self?.currentPath ?? "/"
-                await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
-            }
+                // Refresh current directory after upload
+                if let storage = await self?.selectedStorage {
+                    let parentId = parentId
+                    let path = await self?.currentPath ?? "/"
+                    await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
+                }
+            }.value
         }
     }
 
-    /// Recursively upload a folder with per-file progress tracking
+    /// Recursively upload a folder with per-file progress tracking and cancellation support
     private nonisolated static func uploadFolderWithProgress(
         device: MTPDevice,
         localPath: String,
@@ -404,14 +460,18 @@ public final class MTPManager: ObservableObject {
         storageId: UInt32,
         manager: MTPManager?,
         totalSize: Int64,
-        totalSent: inout Int64
+        totalSent: inout Int64,
+        cancellation: MTPCancellationToken? = nil
     ) throws {
+        if cancellation?.isCancelled == true { throw MTPError.cancelled }
+
         let fm = FileManager.default
         let folderName = (localPath as NSString).lastPathComponent
         let folderId = try device.createFolder(name: folderName, parentId: parentId, storageId: storageId)
 
         let contents = try fm.contentsOfDirectory(atPath: localPath)
         for item in contents {
+            if cancellation?.isCancelled == true { throw MTPError.cancelled }
             if mtpIsDisallowedFile(item) { continue }
             let itemPath = localPath + "/" + item
 
@@ -423,7 +483,8 @@ public final class MTPManager: ObservableObject {
                     device: device, localPath: itemPath,
                     parentId: folderId, storageId: storageId,
                     manager: manager, totalSize: totalSize,
-                    totalSent: &totalSent
+                    totalSent: &totalSent,
+                    cancellation: cancellation
                 )
             } else {
                 let fileSize = (try? fm.attributesOfItem(atPath: itemPath)[.size] as? Int64) ?? 0
@@ -440,6 +501,7 @@ public final class MTPManager: ObservableObject {
                     parentId: folderId,
                     storageId: storageId
                 ) { sent, _ in
+                    if cancellation?.isCancelled == true { return false }
                     MTPManager.updateProgress(
                         on: manager, fileName: item,
                         sent: baseSent + sent, total: totalSize,

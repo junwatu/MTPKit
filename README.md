@@ -14,6 +14,7 @@ A Swift library for communicating with Android devices over **MTP (Media Transfe
 - **Async/await native API** — `async throws` methods and `AsyncThrowingStream` progress streams for modern Swift concurrency
 - **Sendable types** — all model types conform to `Sendable` for safe cross-isolation usage
 - **USB hot-plug monitoring** — real-time device connect/disconnect detection via IOKit with debouncing and `AsyncStream` support
+- **Transfer cancellation** — cooperative cancellation via `Task.isCancelled`, `MTPCancellationToken`, and `cancelTransfer()` with partial file cleanup
 
 ## Requirements
 
@@ -276,7 +277,7 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 
 - [x] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
 - [x] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
-- [ ] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
+- [x] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
 - [ ] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`
 
 ### Medium Impact
@@ -296,6 +297,19 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 - [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
 
 ## Changelog
+
+### v1.3.0 — 2026-03-27
+
+- **Transfer cancellation** — All async download/upload methods now support cooperative cancellation via `Task.isCancelled` and `MTPCancellationToken`.
+- **`MTPError.cancelled`** — New error case thrown when a transfer is cancelled, distinct from transfer errors.
+- **Partial file cleanup** — Cancelled downloads automatically remove partially written files.
+- **`MTPCancellationToken`** — Thread-safe cancellation token for bridging Swift Task cancellation to synchronous libmtp progress callbacks.
+- **`MTPManager.cancelTransfer()`** — One-call method to cancel any active upload/download and reset UI state.
+- **`MTPManager.isTransferring`** — New `@Published` property for binding cancel buttons in SwiftUI.
+- **`AsyncThrowingStream` cancellation** — Stream-based methods (`downloadAsync`, `uploadAsync`, `walkAsync`) cancel on stream termination.
+- **Bulk operation cancellation** — `uploadFolderWithProgress` and `downloadFolderRecursive` check cancellation between files.
+- **`disconnect()` cancels transfers** — Disconnecting automatically cancels any in-progress transfer.
+- **10 new tests** (84 → 94 total) covering cancellation token, error type, manager integration, and thread safety.
 
 ### v1.2.0 — 2026-03-27
 

@@ -331,6 +331,7 @@ test("Error descriptions are non-empty") {
         .detectFailed("x"), .storageInfoError("x"), .noStorage,
         .localFileError("x"), .invalidPath("x"), .fileTransferError("x"),
         .sendObjectError("x"), .noDevicesFound, .deviceOpenFailed("x"),
+        .cancelled,
     ]
     for err in errors {
         try expectNotNil(err.errorDescription)
@@ -703,6 +704,94 @@ testOnMain("MTPManager double startHotPlug is safe") {
     mgr.startHotPlug()  // should not crash
     try expectTrue(mgr.isHotPlugEnabled)
     mgr.stopHotPlug()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── Transfer Cancellation ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("MTPError.cancelled description") {
+    let err = MTPError.cancelled
+    try expectNotNil(err.errorDescription)
+    try expectTrue(err.errorDescription!.contains("cancelled"))
+}
+
+test("MTPError.cancelled equality") {
+    try expectTrue(MTPError.cancelled == MTPError.cancelled)
+    try expectFalse(MTPError.cancelled == MTPError.noStorage)
+}
+
+test("MTPCancellationToken initial state") {
+    let token = MTPCancellationToken()
+    try expectFalse(token.isCancelled)
+}
+
+test("MTPCancellationToken cancel sets isCancelled") {
+    let token = MTPCancellationToken()
+    token.cancel()
+    try expectTrue(token.isCancelled)
+}
+
+test("MTPCancellationToken double cancel is safe") {
+    let token = MTPCancellationToken()
+    token.cancel()
+    token.cancel()
+    try expectTrue(token.isCancelled)
+}
+
+test("MTPCancellationToken is thread-safe") {
+    let token = MTPCancellationToken()
+    let group = DispatchGroup()
+
+    // Cancel from one thread, check from another
+    for _ in 0..<100 {
+        group.enter()
+        DispatchQueue.global().async {
+            _ = token.isCancelled
+            group.leave()
+        }
+    }
+    group.enter()
+    DispatchQueue.global().async {
+        token.cancel()
+        group.leave()
+    }
+    group.wait()
+    try expectTrue(token.isCancelled)
+}
+
+testOnMain("MTPManager cancelTransfer resets state") {
+    let mgr = MTPManager()
+    mgr.transferProgress = MTPManager.TransferProgress(
+        fileName: "test.jpg", sent: 50, total: 100, isUploading: true
+    )
+    mgr.isTransferring = true
+    mgr.cancelTransfer()
+    try expectNil(mgr.transferProgress)
+    try expectFalse(mgr.isTransferring)
+}
+
+testOnMain("MTPManager cancelTransfer when no transfer is safe") {
+    let mgr = MTPManager()
+    mgr.cancelTransfer()  // should not crash
+    try expectFalse(mgr.isTransferring)
+    try expectNil(mgr.transferProgress)
+}
+
+testOnMain("MTPManager disconnect cancels active transfer") {
+    let mgr = MTPManager()
+    mgr.transferProgress = MTPManager.TransferProgress(
+        fileName: "test.jpg", sent: 50, total: 100, isUploading: false
+    )
+    mgr.isTransferring = true
+    mgr.disconnect()
+    try expectFalse(mgr.isTransferring)
+    try expectNil(mgr.transferProgress)
+}
+
+testOnMain("MTPManager isTransferring initial state") {
+    let mgr = MTPManager()
+    try expectFalse(mgr.isTransferring)
 }
 
 // ============================================================================
