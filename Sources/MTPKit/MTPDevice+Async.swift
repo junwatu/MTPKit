@@ -310,6 +310,24 @@ extension MTPDevice {
         }.value
     }
 
+    // MARK: - Async Rename & Move
+
+    /// Rename a file or folder on the device asynchronously
+    public func renameObject(objectId: UInt32, newName: String) async throws {
+        try Task.checkCancellation()
+        try await Task.detached {
+            try self.renameObject(objectId: objectId, newName: newName)
+        }.value
+    }
+
+    /// Move a file or folder to a different parent folder asynchronously
+    public func moveObject(objectId: UInt32, storageId: UInt32, newParentId: UInt32) async throws {
+        try Task.checkCancellation()
+        try await Task.detached {
+            try self.moveObject(objectId: objectId, storageId: storageId, newParentId: newParentId)
+        }.value
+    }
+
     // MARK: - Async Walk
 
     /// Walk a directory tree recursively, yielding each item as an AsyncThrowingStream.

@@ -794,6 +794,43 @@ testOnMain("MTPManager isTransferring initial state") {
     try expectFalse(mgr.isTransferring)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── Rename & Move ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+testOnMain("MTPManager renameFile does nothing without device") {
+    let mgr = MTPManager()
+    mgr.selectedDevice = nil
+    let file = makeFileInfo(name: "old.txt")
+    mgr.renameFile(file, newName: "new.txt")
+    // Should not crash; no device means no-op
+    try expectNil(mgr.errorMessage)
+}
+
+testOnMain("MTPManager renameFile does nothing without storage") {
+    let mgr = MTPManager()
+    mgr.selectedStorage = nil
+    let file = makeFileInfo(name: "old.txt")
+    mgr.renameFile(file, newName: "new.txt")
+    try expectNil(mgr.errorMessage)
+}
+
+testOnMain("MTPManager moveFile does nothing without device") {
+    let mgr = MTPManager()
+    mgr.selectedDevice = nil
+    let file = makeFileInfo(name: "photo.jpg")
+    mgr.moveFile(file, toParentId: 100)
+    try expectNil(mgr.errorMessage)
+}
+
+testOnMain("MTPManager moveFile does nothing without storage") {
+    let mgr = MTPManager()
+    mgr.selectedStorage = nil
+    let file = makeFileInfo(name: "photo.jpg")
+    mgr.moveFile(file, toParentId: 100)
+    try expectNil(mgr.errorMessage)
+}
+
 // ============================================================================
 // SUMMARY
 // ============================================================================

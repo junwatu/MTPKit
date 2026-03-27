@@ -565,4 +565,48 @@ public final class MTPManager: ObservableObject {
             }
         }
     }
+
+    // MARK: - Rename
+
+    /// Rename a file or folder on the device, then refresh the current directory
+    public func renameFile(_ file: MTPFileInfo, newName: String) {
+        guard let device = selectedDevice, let storage = selectedStorage else { return }
+
+        Task { [weak self] in
+            do {
+                try await device.renameObject(objectId: file.objectId, newName: newName)
+
+                // Refresh
+                let path = self?.currentPath ?? "/"
+                let parentId = self?.currentParentId ?? MTPParentObjectID
+                await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
+            } catch {
+                self?.errorMessage = "Rename failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Move
+
+    /// Move a file or folder to a different parent folder, then refresh
+    public func moveFile(_ file: MTPFileInfo, toParentId: UInt32) {
+        guard let device = selectedDevice, let storage = selectedStorage else { return }
+
+        Task { [weak self] in
+            do {
+                try await device.moveObject(
+                    objectId: file.objectId,
+                    storageId: storage.id,
+                    newParentId: toParentId
+                )
+
+                // Refresh current directory
+                let path = self?.currentPath ?? "/"
+                let parentId = self?.currentParentId ?? MTPParentObjectID
+                await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
+            } catch {
+                self?.errorMessage = "Move failed: \(error.localizedDescription)"
+            }
+        }
+    }
 }

@@ -355,6 +355,46 @@ public final class MTPDevice: @unchecked Sendable {
         }
     }
 
+    // MARK: - Rename
+
+    /// Rename a file or folder on the device
+    ///
+    /// - Parameters:
+    ///   - objectId: The object to rename
+    ///   - newName: The new filename (just the name, not a path)
+    public func renameObject(objectId: UInt32, newName: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let nameCStr = strdup(newName)
+        defer { free(nameCStr) }
+
+        let ret = LIBMTP_Set_Object_Filename(device, objectId, nameCStr)
+        if ret != 0 {
+            let errMsg = drainErrorStack(device) ?? "Unknown error"
+            throw MTPError.fileTransferError("Rename failed: \(errMsg)")
+        }
+    }
+
+    // MARK: - Move
+
+    /// Move a file or folder to a different parent folder
+    ///
+    /// - Parameters:
+    ///   - objectId: The object to move
+    ///   - storageId: The destination storage ID
+    ///   - newParentId: The destination parent folder ID (use `MTPParentObjectID` for root)
+    public func moveObject(objectId: UInt32, storageId: UInt32, newParentId: UInt32) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let ret = LIBMTP_Move_Object(device, objectId, storageId, newParentId)
+        if ret != 0 {
+            let errMsg = drainErrorStack(device) ?? "Unknown error"
+            throw MTPError.fileTransferError("Move failed: \(errMsg)")
+        }
+    }
+
     // MARK: - Recursive Walk
 
     /// Walk a directory tree recursively, calling callback for each item

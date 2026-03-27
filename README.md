@@ -15,6 +15,7 @@ A Swift library for communicating with Android devices over **MTP (Media Transfe
 - **Sendable types** — all model types conform to `Sendable` for safe cross-isolation usage
 - **USB hot-plug monitoring** — real-time device connect/disconnect detection via IOKit with debouncing and `AsyncStream` support
 - **Transfer cancellation** — cooperative cancellation via `Task.isCancelled`, `MTPCancellationToken`, and `cancelTransfer()` with partial file cleanup
+- **Rename & move** — rename files/folders via `LIBMTP_Set_Object_Filename` and move between directories via `LIBMTP_Move_Object`
 
 ## Requirements
 
@@ -118,6 +119,24 @@ let folderId = try device.createFolder(
 
 // Delete file or folder
 try device.deleteObject(objectId: file.objectId)
+```
+
+### Rename & Move
+
+```swift
+// Rename a file or folder
+try device.renameObject(objectId: file.objectId, newName: "new-name.jpg")
+
+// Move a file to a different folder
+try device.moveObject(
+    objectId: file.objectId,
+    storageId: storage.id,
+    newParentId: targetFolderId
+)
+
+// Async versions
+try await device.renameObject(objectId: file.objectId, newName: "new-name.jpg")
+try await device.moveObject(objectId: file.objectId, storageId: storage.id, newParentId: targetFolderId)
 ```
 
 ### Async/Await API
@@ -278,7 +297,7 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 - [x] **Async/await native API** — Replace completion handlers with `async throws` methods for modern Swift concurrency
 - [x] **USB hot-plug monitoring** — Detect device connect/disconnect events in real-time via IOKit notifications
 - [x] **Transfer cancellation** — Support cooperative cancellation of uploads/downloads via `Task.isCancelled`
-- [ ] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`
+- [x] **Rename/Move files** — Add `renameObject()` and `moveObject()` wrappers over `LIBMTP_Set_Object_Filename`
 
 ### Medium Impact
 
@@ -297,6 +316,14 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 - [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
 
 ## Changelog
+
+### v1.4.0 — 2026-03-28
+
+- **Rename files/folders** — `renameObject(objectId:newName:)` wraps `LIBMTP_Set_Object_Filename` for renaming any MTP object in-place.
+- **Move files/folders** — `moveObject(objectId:storageId:newParentId:)` wraps `LIBMTP_Move_Object` for moving objects between directories.
+- **Async rename/move** — Both methods have `async throws` counterparts with `Task.checkCancellation()` support.
+- **MTPManager integration** — `renameFile(_:newName:)` and `moveFile(_:toParentId:)` with automatic directory refresh.
+- **4 new tests** (94 → 98 total) covering guard clauses for rename/move.
 
 ### v1.3.0 — 2026-03-27
 
