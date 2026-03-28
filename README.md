@@ -11,11 +11,14 @@ A Swift library for communicating with Android devices over **MTP (Media Transfe
 - **Samsung support** — uncached mode, storage retry, root parent ID mapping, >4GB file handling
 - **SwiftUI ready** — includes `MTPManager`, an `@MainActor ObservableObject` with `@Published` state
 - **Progress tracking** — throttled UI updates at ~30fps via `DispatchQueue.main.async`
-- **Async/await native API** — `async throws` methods and `AsyncThrowingStream` progress streams for modern Swift concurrency
+- **Async/await native API** — `async throws` methods and `AsyncThrowingStream` progress streams, all serialized through a per-device operation queue
 - **Sendable types** — all model types conform to `Sendable` for safe cross-isolation usage
 - **USB hot-plug monitoring** — real-time device connect/disconnect detection via IOKit with debouncing and `AsyncStream` support
 - **Transfer cancellation** — cooperative cancellation via `Task.isCancelled`, `MTPCancellationToken`, and `cancelTransfer()` with partial file cleanup
 - **Rename & move** — rename files/folders via `LIBMTP_Set_Object_Filename` and move between directories via `LIBMTP_Move_Object`
+- **Thumbnails** — retrieve device-generated thumbnails for images/videos via `LIBMTP_Get_Thumbnail` with async wrapper and `MTPManager` cache
+- **Connection state machine** — `ConnectionState` enum prevents overlapping connect/disconnect operations
+- **Thread-safe USB** — serial operation queue prevents libmtp race conditions; `releaseDevice()` runs off-main-thread; `detectDevicesAsync()` has configurable timeout
 
 ## Requirements
 
@@ -256,7 +259,8 @@ struct MyApp: App {
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `isConnected` | `Bool` | Device connection status |
+| `connectionState` | `ConnectionState` | State machine: `.disconnected` / `.connecting` / `.connected` / `.disconnecting` |
+| `isConnected` | `Bool` | Convenience — `true` when `connectionState == .connected` |
 | `isLoading` | `Bool` | Loading indicator |
 | `devices` | `[MTPDevice]` | Detected devices |
 | `deviceInfo` | `MTPDeviceInfo?` | Manufacturer, model, serial |
@@ -265,6 +269,8 @@ struct MyApp: App {
 | `currentPath` | `String` | Current browsing path |
 | `transferProgress` | `TransferProgress?` | Active transfer progress |
 | `errorMessage` | `String?` | Last error message |
+| `viewMode` | `FileViewMode` | `.list` or `.grid` view mode |
+| `thumbnails` | `[UInt32: NSImage]` | Cached device thumbnails by object ID |
 
 ## Architecture
 
@@ -301,21 +307,36 @@ Planned enhancements for MTPKit. Check marks indicate implemented features.
 
 ### Medium Impact
 
+- [x] **Thumbnail support** — Retrieve device-generated thumbnails via `LIBMTP_Get_Thumbnail`
+- [x] **Connection state machine** — `ConnectionState` enum prevents overlapping connect/disconnect
+- [x] **Serial operation queue** — All per-device libmtp calls serialized through `DispatchQueue`
 - [ ] **Swift Actor instead of NSLock** — Replace manual locking with a `MTPDeviceActor` for safer concurrency
-- [ ] **Thumbnail support** — Retrieve device-generated thumbnails via `LIBMTP_Get_Thumbnail`
 - [ ] **Storage refresh after transfers** — Auto-refresh storage info (free space) after upload/download/delete
 - [ ] **Batch delete** — Delete multiple objects in a single call with rollback on partial failure
 - [ ] **DocC documentation** — Add full DocC-compatible documentation with code examples
 
 ### Nice to Have
 
-- [ ] **Reconnection handling** — Auto-reconnect when a device is temporarily disconnected
+- [x] **Reconnection handling** — Auto-reconnect when a device is temporarily disconnected via hot-plug monitoring
 - [ ] **File type mapping** — Map file extensions to MTP file types for better device compatibility
 - [ ] **CI with GitHub Actions** — Automated build and test pipeline on macOS runners
 - [ ] **Swift 6 strict concurrency** — Full `Sendable` compliance and data-race safety
 - [ ] **SPM plugin for code signing** — Build tool plugin to automate ad-hoc signing of bundled dylibs
 
 ## Changelog
+
+### v1.5.0 — 2026-03-29
+
+- **Serial operation queue** — All per-device libmtp calls are now serialized through a `DispatchQueue`, preventing concurrent USB access that could corrupt libmtp's internal state.
+- **Connection state machine** — New `ConnectionState` enum (`.disconnected` → `.connecting` → `.connected` → `.disconnecting`) guards against overlapping `connect()`/`disconnect()` calls.
+- **Off-main-thread device release** — `releaseDevice()` dispatches `LIBMTP_Release_Device` to the operation queue, preventing UI freezing when USB handles are stale.
+- **Detection timeout** — `detectDevicesAsync(timeout:)` now accepts a configurable timeout (default 10s) to prevent indefinite hangs during USB state transitions.
+- **Thumbnail support** — `getThumbnail(objectId:)` and `getThumbnailAsync(objectId:)` retrieve device-generated JPEG thumbnails for images and videos. `MTPManager` includes lazy loading with deduplication and an `NSImage` cache.
+- **View mode** — `FileViewMode` enum (`.list` / `.grid`) with `MTPManager.viewMode` property.
+- **`MTPManager.isThumbnailable(_:)`** — Static helper to check if a file is an image or video that may have a device thumbnail.
+- **Tighter hot-plug guards** — Auto-connect only fires from `.disconnected` state; disconnect verification uses 5s timeout and releases leaked detection devices.
+- **In-flight connect cancellation** — `disconnect()` cancels any in-progress `connectTask` and verifies state hasn't changed after async detection returns.
+- **15 new tests** (98 → 113 total) covering connection state machine, thumbnails, disconnect safety, and view mode.
 
 ### v1.4.0 — 2026-03-28
 

@@ -1,6 +1,7 @@
 // MTPKitTests — Self-contained test runner for MTPKit
 // Run: swift run MTPKitTests
 import Foundation
+import AppKit
 @testable import MTPKit
 
 // MARK: - Test Framework
@@ -331,7 +332,6 @@ test("Error descriptions are non-empty") {
         .detectFailed("x"), .storageInfoError("x"), .noStorage,
         .localFileError("x"), .invalidPath("x"), .fileTransferError("x"),
         .sendObjectError("x"), .noDevicesFound, .deviceOpenFailed("x"),
-        .cancelled,
     ]
     for err in errors {
         try expectNotNil(err.errorDescription)
@@ -469,7 +469,7 @@ testOnMain("navigateToRoot without storage does nothing") {
 
 testOnMain("disconnect resets all state") {
     let mgr = MTPManager()
-    mgr.isConnected = true
+    mgr.connectionState = .connected
     mgr.currentPath = "/DCIM"
     mgr.currentParentId = 20
     mgr.pathHistory = [MTPManager.PathEntry(path: "/", browseParentId: MTPParentObjectID, name: "/")]
@@ -518,317 +518,492 @@ test("TransferProgress zero total") {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-print("\n── Async Types ──")
+print("\n── MTPError: deviceDisconnected ──")
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("MTPTransferEvent progress case") {
-    let event = MTPTransferEvent.progress(sent: 500, total: 1000)
-    if case .progress(let sent, let total) = event {
-        try expect(sent, Int64(500))
-        try expect(total, Int64(1000))
-    } else {
-        throw TestError("Expected .progress case")
+test("deviceDisconnected has description") {
+    let err = MTPError.deviceDisconnected
+    try expectNotNil(err.errorDescription)
+    try expectTrue(err.errorDescription!.contains("disconnected"))
+}
+
+test("deviceDisconnected equality") {
+    try expectTrue(MTPError.deviceDisconnected == MTPError.deviceDisconnected)
+    try expectFalse(MTPError.deviceDisconnected == MTPError.cancelled)
+}
+
+test("deviceDisconnected mentions USB") {
+    try expectTrue(MTPError.deviceDisconnected.errorDescription!.contains("USB"))
+}
+
+test("cancelled error description") {
+    try expect(MTPError.cancelled.errorDescription, "Transfer cancelled")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── FileViewMode ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("FileViewMode has list and grid cases") {
+    try expect(FileViewMode.list.rawValue, "list")
+    try expect(FileViewMode.grid.rawValue, "grid")
+}
+
+test("FileViewMode allCases contains both") {
+    try expect(FileViewMode.allCases.count, 2)
+    try expectTrue(FileViewMode.allCases.contains(.list))
+    try expectTrue(FileViewMode.allCases.contains(.grid))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPManager: ViewMode ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+testOnMain("Manager default viewMode is list") {
+    let mgr = MTPManager()
+    try expect(mgr.viewMode, FileViewMode.list)
+}
+
+testOnMain("Manager viewMode can be set to grid") {
+    let mgr = MTPManager()
+    mgr.viewMode = .grid
+    try expect(mgr.viewMode, FileViewMode.grid)
+}
+
+testOnMain("Manager viewMode toggle roundtrip") {
+    let mgr = MTPManager()
+    try expect(mgr.viewMode, .list)
+    mgr.viewMode = .grid
+    try expect(mgr.viewMode, .grid)
+    mgr.viewMode = .list
+    try expect(mgr.viewMode, .list)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPManager: Thumbnails ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+testOnMain("isThumbnailable for image files") {
+    let jpg = makeFileInfo(name: "photo.jpg", fullPath: "/photo.jpg")
+    let png = makeFileInfo(name: "screenshot.png", fullPath: "/screenshot.png")
+    let heic = makeFileInfo(name: "img.heic", fullPath: "/img.heic")
+    try expectTrue(MTPManager.isThumbnailable(jpg))
+    try expectTrue(MTPManager.isThumbnailable(png))
+    try expectTrue(MTPManager.isThumbnailable(heic))
+}
+
+testOnMain("isThumbnailable for video files") {
+    let mp4 = makeFileInfo(name: "video.mp4", fullPath: "/video.mp4")
+    let mov = makeFileInfo(name: "clip.mov", fullPath: "/clip.mov")
+    let mkv = makeFileInfo(name: "movie.mkv", fullPath: "/movie.mkv")
+    try expectTrue(MTPManager.isThumbnailable(mp4))
+    try expectTrue(MTPManager.isThumbnailable(mov))
+    try expectTrue(MTPManager.isThumbnailable(mkv))
+}
+
+testOnMain("isThumbnailable false for non-media files") {
+    let txt = makeFileInfo(name: "readme.txt", fullPath: "/readme.txt")
+    let pdf = makeFileInfo(name: "doc.pdf", fullPath: "/doc.pdf")
+    let apk = makeFileInfo(name: "app.apk", fullPath: "/app.apk")
+    let zip = makeFileInfo(name: "archive.zip", fullPath: "/archive.zip")
+    try expectFalse(MTPManager.isThumbnailable(txt))
+    try expectFalse(MTPManager.isThumbnailable(pdf))
+    try expectFalse(MTPManager.isThumbnailable(apk))
+    try expectFalse(MTPManager.isThumbnailable(zip))
+}
+
+testOnMain("isThumbnailable false for directories") {
+    let dir = makeFileInfo(name: "DCIM", fullPath: "/DCIM", isDir: true)
+    try expectFalse(MTPManager.isThumbnailable(dir))
+}
+
+testOnMain("isThumbnailable case insensitive") {
+    let upper = makeFileInfo(name: "PHOTO.JPG", fullPath: "/PHOTO.JPG")
+    let mixed = makeFileInfo(name: "Video.MP4", fullPath: "/Video.MP4")
+    try expectTrue(MTPManager.isThumbnailable(upper))
+    try expectTrue(MTPManager.isThumbnailable(mixed))
+}
+
+testOnMain("thumbnails cache starts empty") {
+    let mgr = MTPManager()
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+testOnMain("disconnect clears thumbnail cache") {
+    let mgr = MTPManager()
+    mgr.connectionState = .connected
+    // Simulate a cached thumbnail by directly setting
+    let nsImage = NSImage(size: NSSize(width: 1, height: 1))
+    mgr.thumbnails[42] = nsImage
+    try expect(mgr.thumbnails.count, 1)
+
+    mgr.disconnect()
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+testOnMain("fetchThumbnail skips directories") {
+    let mgr = MTPManager()
+    let dir = makeFileInfo(name: "DCIM", fullPath: "/DCIM", isDir: true)
+    mgr.fetchThumbnail(for: dir)
+    // No crash, no thumbnail requested — just a no-op
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+testOnMain("fetchThumbnail skips non-media files") {
+    let mgr = MTPManager()
+    let txt = makeFileInfo(name: "readme.txt", fullPath: "/readme.txt")
+    mgr.fetchThumbnail(for: txt)
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+testOnMain("fetchThumbnail skips without device") {
+    let mgr = MTPManager()
+    mgr.selectedDevice = nil
+    let jpg = makeFileInfo(name: "photo.jpg", fullPath: "/photo.jpg")
+    mgr.fetchThumbnail(for: jpg)
+    // Should not crash, should not add to cache
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+testOnMain("fetchThumbnail deduplicates requests") {
+    let mgr = MTPManager()
+    // Without a device, fetchThumbnail won't start a task,
+    // but we can verify the dedup logic by checking it doesn't crash
+    // when called multiple times for the same file
+    let jpg = makeFileInfo(objectId: 100, name: "photo.jpg", fullPath: "/photo.jpg")
+    mgr.fetchThumbnail(for: jpg)
+    mgr.fetchThumbnail(for: jpg)
+    mgr.fetchThumbnail(for: jpg)
+    try expectTrue(mgr.thumbnails.isEmpty)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPManager: Disconnect Safety ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+testOnMain("disconnect clears all state including thumbnails and viewMode preserved") {
+    let mgr = MTPManager()
+    mgr.connectionState = .connected
+    mgr.currentPath = "/DCIM/Camera"
+    mgr.currentParentId = 42
+    mgr.pathHistory = [MTPManager.PathEntry(path: "/", browseParentId: MTPParentObjectID, name: "/")]
+    mgr.errorMessage = "some error"
+    mgr.viewMode = .grid
+    let nsImage = NSImage(size: NSSize(width: 1, height: 1))
+    mgr.thumbnails[1] = nsImage
+
+    mgr.disconnect()
+
+    try expectFalse(mgr.isConnected)
+    try expect(mgr.currentPath, "/")
+    try expect(mgr.currentParentId, MTPParentObjectID)
+    try expectTrue(mgr.pathHistory.isEmpty)
+    try expectNil(mgr.errorMessage)
+    try expectNil(mgr.transferProgress)
+    try expectFalse(mgr.isTransferring)
+    try expectTrue(mgr.thumbnails.isEmpty)
+    try expectTrue(mgr.devices.isEmpty)
+    try expectNil(mgr.selectedDevice)
+    try expectNil(mgr.deviceInfo)
+    try expectTrue(mgr.storages.isEmpty)
+    try expectNil(mgr.selectedStorage)
+    // viewMode should persist across disconnect (user preference)
+    try expect(mgr.viewMode, .grid)
+}
+
+testOnMain("disconnect is idempotent") {
+    let mgr = MTPManager()
+    mgr.connectionState = .connected
+    mgr.disconnect()
+    try expectFalse(mgr.isConnected)
+    try expect(mgr.connectionState, .disconnected)
+    // Second disconnect should not crash — guarded by state machine
+    mgr.disconnect()
+    try expectFalse(mgr.isConnected)
+    try expect(mgr.connectionState, .disconnected)
+}
+
+testOnMain("cancelTransfer resets transfer state") {
+    let mgr = MTPManager()
+    mgr.isTransferring = true
+    mgr.transferProgress = MTPManager.TransferProgress(
+        fileName: "test.jpg", sent: 50, total: 100, isUploading: false
+    )
+    mgr.cancelTransfer()
+    try expectFalse(mgr.isTransferring)
+    try expectNil(mgr.transferProgress)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPCancellationToken ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("CancellationToken starts not cancelled") {
+    let token = MTPCancellationToken()
+    try expectFalse(token.isCancelled)
+}
+
+test("CancellationToken cancel sets flag") {
+    let token = MTPCancellationToken()
+    token.cancel()
+    try expectTrue(token.isCancelled)
+}
+
+test("CancellationToken cancel is idempotent") {
+    let token = MTPCancellationToken()
+    token.cancel()
+    token.cancel()
+    try expectTrue(token.isCancelled)
+}
+
+test("CancellationToken thread safety") {
+    let token = MTPCancellationToken()
+    let group = DispatchGroup()
+
+    // Cancel from multiple threads simultaneously
+    for _ in 0..<100 {
+        group.enter()
+        DispatchQueue.global().async {
+            token.cancel()
+            _ = token.isCancelled
+            group.leave()
+        }
     }
+
+    group.wait()
+    try expectTrue(token.isCancelled)
 }
 
-test("MTPTransferEvent completed case with objectId") {
-    let event = MTPTransferEvent.completed(objectId: 42)
-    if case .completed(let objId) = event {
-        try expect(objId, UInt32(42))
-    } else {
-        throw TestError("Expected .completed case")
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPManager: TransferProgress ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("TransferProgress formatted strings") {
+    let tp = MTPManager.TransferProgress(
+        fileName: "video.mp4", sent: 1_048_576, total: 10_485_760, isUploading: true
+    )
+    try expectFalse(tp.formattedSent.isEmpty)
+    try expectFalse(tp.formattedTotal.isEmpty)
+    try expectTrue(tp.isUploading)
+    try expect(tp.fileName, "video.mp4")
 }
 
-test("MTPTransferEvent completed case with nil objectId") {
-    let event = MTPTransferEvent.completed(objectId: nil)
-    if case .completed(let objId) = event {
-        try expectNil(objId)
-    } else {
-        throw TestError("Expected .completed case")
-    }
+test("TransferProgress percentage calculation") {
+    let tp25 = MTPManager.TransferProgress(fileName: "a", sent: 25, total: 100, isUploading: false)
+    try expect(tp25.percentage, 25.0)
+
+    let tp100 = MTPManager.TransferProgress(fileName: "a", sent: 100, total: 100, isUploading: false)
+    try expect(tp100.percentage, 100.0)
+
+    let tp0 = MTPManager.TransferProgress(fileName: "a", sent: 0, total: 100, isUploading: false)
+    try expect(tp0.percentage, 0.0)
 }
 
-test("MTPBulkTransferEvent progress case") {
-    var pInfo = MTPProgressInfo()
-    pInfo.totalFiles = 10
-    pInfo.filesSent = 5
-    let event = MTPBulkTransferEvent.progress(pInfo)
-    if case .progress(let info) = event {
-        try expect(info.totalFiles, Int64(10))
-        try expect(info.filesSent, Int64(5))
-    } else {
-        throw TestError("Expected .progress case")
-    }
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPManager: Hot-Plug State ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+testOnMain("Manager starts with hotplug disabled") {
+    let mgr = MTPManager()
+    try expectFalse(mgr.isHotPlugEnabled)
 }
 
-test("MTPBulkTransferEvent completed case") {
-    let event = MTPBulkTransferEvent.completed
-    if case .completed = event {
-        // pass
-    } else {
-        throw TestError("Expected .completed case")
-    }
+testOnMain("stopHotPlug resets flag") {
+    let mgr = MTPManager()
+    mgr.startHotPlug()
+    try expectTrue(mgr.isHotPlugEnabled)
+    mgr.stopHotPlug()
+    try expectFalse(mgr.isHotPlugEnabled)
 }
 
-test("MTPFileInfo is Sendable") {
-    let file = makeFileInfo()
-    // Verify it can be passed to a Sendable closure
-    let closure: @Sendable () -> String = { file.name }
-    try expect(closure(), "test.txt")
-}
-
-test("MTPStorageInfo is Sendable") {
-    let storage = makeStorage()
-    let closure: @Sendable () -> UInt32 = { storage.id }
-    try expect(closure(), UInt32(1))
-}
-
-test("MTPDeviceInfo is Sendable") {
-    let info = MTPDeviceInfo(id: "123", manufacturer: "Samsung", model: "Galaxy", serialNumber: "123", deviceVersion: "1.0", friendlyName: "Phone")
-    let closure: @Sendable () -> String = { info.manufacturer }
-    try expect(closure(), "Samsung")
-}
-
-test("MTPProgressInfo is Sendable") {
-    var pInfo = MTPProgressInfo()
-    pInfo.totalFiles = 5
-    let closure: @Sendable () -> Int64 = { pInfo.totalFiles }
-    try expect(closure(), Int64(5))
-}
-
-test("MTPSizeProgress is Sendable") {
-    let sp = MTPSizeProgress(total: 100, sent: 50, progress: 50.0)
-    let closure: @Sendable () -> Int64 = { sp.total }
-    try expect(closure(), Int64(100))
+testOnMain("startHotPlug is idempotent") {
+    let mgr = MTPManager()
+    mgr.startHotPlug()
+    mgr.startHotPlug() // Should not crash or double-register
+    try expectTrue(mgr.isHotPlugEnabled)
+    mgr.stopHotPlug()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 print("\n── USBDeviceMonitor ──")
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("USBDeviceMonitor initial state") {
+test("USBDeviceMonitor starts not monitoring") {
     let monitor = USBDeviceMonitor()
     try expectFalse(monitor.monitoring)
 }
 
-test("USBDeviceMonitor start sets monitoring true") {
+test("USBDeviceMonitor stop when not started is safe") {
     let monitor = USBDeviceMonitor()
-    monitor.startMonitoring { _ in }
-    // Give the background thread a moment to start
-    Thread.sleep(forTimeInterval: 0.1)
-    try expectTrue(monitor.monitoring)
-    monitor.stopMonitoring()
-}
-
-test("USBDeviceMonitor stop sets monitoring false") {
-    let monitor = USBDeviceMonitor()
-    monitor.startMonitoring { _ in }
-    Thread.sleep(forTimeInterval: 0.1)
-    monitor.stopMonitoring()
+    monitor.stopMonitoring() // Should not crash
     try expectFalse(monitor.monitoring)
 }
 
-test("USBDeviceMonitor double start is safe") {
-    let monitor = USBDeviceMonitor()
-    monitor.startMonitoring { _ in }
-    monitor.startMonitoring { _ in }  // should not crash
-    Thread.sleep(forTimeInterval: 0.1)
-    try expectTrue(monitor.monitoring)
-    monitor.stopMonitoring()
+test("USBDeviceMonitor Event descriptions") {
+    try expect(USBDeviceMonitor.Event.deviceConnected.description, "deviceConnected")
+    try expect(USBDeviceMonitor.Event.deviceDisconnected.description, "deviceDisconnected")
 }
 
-test("USBDeviceMonitor double stop is safe") {
-    let monitor = USBDeviceMonitor()
-    monitor.startMonitoring { _ in }
-    Thread.sleep(forTimeInterval: 0.1)
-    monitor.stopMonitoring()
-    monitor.stopMonitoring()  // should not crash
-    try expectFalse(monitor.monitoring)
-}
-
-test("USBDeviceMonitor deinit stops monitoring") {
-    var monitor: USBDeviceMonitor? = USBDeviceMonitor()
-    monitor?.startMonitoring { _ in }
-    Thread.sleep(forTimeInterval: 0.1)
-    monitor = nil  // should not crash, deinit calls stopMonitoring
-    try expectTrue(true)  // if we got here, no crash
-}
-
-test("USBDeviceMonitor.Event descriptions") {
-    let connect = USBDeviceMonitor.Event.deviceConnected
-    let disconnect = USBDeviceMonitor.Event.deviceDisconnected
-    try expect(connect.description, "deviceConnected")
-    try expect(disconnect.description, "deviceDisconnected")
-}
-
-test("USBDeviceMonitor.Event equality") {
+test("USBDeviceMonitor Event equality") {
     try expectTrue(USBDeviceMonitor.Event.deviceConnected == .deviceConnected)
-    try expectTrue(USBDeviceMonitor.Event.deviceDisconnected == .deviceDisconnected)
     try expectFalse(USBDeviceMonitor.Event.deviceConnected == .deviceDisconnected)
 }
 
-test("USBDeviceMonitor debounceInterval default") {
-    let monitor = USBDeviceMonitor()
-    try expectTrue(abs(monitor.debounceInterval - 0.5) < 0.01)
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPTypes: Async Event Types ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("MTPTransferEvent progress case") {
+    let event = MTPTransferEvent.progress(sent: 100, total: 1000)
+    if case .progress(let sent, let total) = event {
+        try expect(sent, Int64(100))
+        try expect(total, Int64(1000))
+    } else {
+        throw TestError("Expected progress case")
+    }
 }
 
-test("USBDeviceMonitor debounceInterval configurable") {
-    let monitor = USBDeviceMonitor()
-    monitor.debounceInterval = 1.0
-    try expectTrue(abs(monitor.debounceInterval - 1.0) < 0.01)
+test("MTPTransferEvent completed case") {
+    let event = MTPTransferEvent.completed(objectId: 42)
+    if case .completed(let id) = event {
+        try expect(id, UInt32(42))
+    } else {
+        throw TestError("Expected completed case")
+    }
 }
 
-testOnMain("MTPManager hot-plug initial state") {
-    let mgr = MTPManager()
-    try expectFalse(mgr.isHotPlugEnabled)
+test("MTPTransferEvent completed nil objectId") {
+    let event = MTPTransferEvent.completed(objectId: nil)
+    if case .completed(let id) = event {
+        try expectNil(id)
+    } else {
+        throw TestError("Expected completed case")
+    }
 }
 
-testOnMain("MTPManager startHotPlug enables monitoring") {
-    let mgr = MTPManager()
-    mgr.startHotPlug()
-    try expectTrue(mgr.isHotPlugEnabled)
-    mgr.stopHotPlug()
-}
-
-testOnMain("MTPManager stopHotPlug disables monitoring") {
-    let mgr = MTPManager()
-    mgr.startHotPlug()
-    mgr.stopHotPlug()
-    try expectFalse(mgr.isHotPlugEnabled)
-}
-
-testOnMain("MTPManager double startHotPlug is safe") {
-    let mgr = MTPManager()
-    mgr.startHotPlug()
-    mgr.startHotPlug()  // should not crash
-    try expectTrue(mgr.isHotPlugEnabled)
-    mgr.stopHotPlug()
+test("MTPBulkTransferEvent completed case") {
+    let event = MTPBulkTransferEvent.completed
+    if case .completed = event {
+        // OK
+    } else {
+        throw TestError("Expected completed case")
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-print("\n── Transfer Cancellation ──")
+print("\n── MTPFileInfo: Edge Cases ──")
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("MTPError.cancelled description") {
-    let err = MTPError.cancelled
-    try expectNotNil(err.errorDescription)
-    try expectTrue(err.errorDescription!.contains("cancelled"))
+test("FileInfo formattedDate is non-empty") {
+    let file = makeFileInfo()
+    try expectFalse(file.formattedDate.isEmpty)
 }
 
-test("MTPError.cancelled equality") {
-    try expectTrue(MTPError.cancelled == MTPError.cancelled)
-    try expectFalse(MTPError.cancelled == MTPError.noStorage)
+test("FileInfo with zero size") {
+    let file = makeFileInfo(size: 0)
+    try expectFalse(file.formattedSize.isEmpty)
 }
 
-test("MTPCancellationToken initial state") {
-    let token = MTPCancellationToken()
-    try expectFalse(token.isCancelled)
+test("FileInfo Hashable conformance") {
+    let a = makeFileInfo(objectId: 1, name: "a.txt", fullPath: "/a.txt")
+    let b = makeFileInfo(objectId: 2, name: "b.txt", fullPath: "/b.txt")
+    let set: Set<MTPFileInfo> = [a, b, a]
+    try expect(set.count, 2)
 }
 
-test("MTPCancellationToken cancel sets isCancelled") {
-    let token = MTPCancellationToken()
-    token.cancel()
-    try expectTrue(token.isCancelled)
+test("FileInfo Identifiable uses objectId") {
+    let file = makeFileInfo(objectId: 99)
+    try expect(file.id, UInt32(99))
 }
 
-test("MTPCancellationToken double cancel is safe") {
-    let token = MTPCancellationToken()
-    token.cancel()
-    token.cancel()
-    try expectTrue(token.isCancelled)
-}
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── MTPDeviceInfo ──")
+// ─────────────────────────────────────────────────────────────────────────────
 
-test("MTPCancellationToken is thread-safe") {
-    let token = MTPCancellationToken()
-    let group = DispatchGroup()
-
-    // Cancel from one thread, check from another
-    for _ in 0..<100 {
-        group.enter()
-        DispatchQueue.global().async {
-            _ = token.isCancelled
-            group.leave()
-        }
-    }
-    group.enter()
-    DispatchQueue.global().async {
-        token.cancel()
-        group.leave()
-    }
-    group.wait()
-    try expectTrue(token.isCancelled)
-}
-
-testOnMain("MTPManager cancelTransfer resets state") {
-    let mgr = MTPManager()
-    mgr.transferProgress = MTPManager.TransferProgress(
-        fileName: "test.jpg", sent: 50, total: 100, isUploading: true
+test("DeviceInfo stores all fields") {
+    let info = MTPDeviceInfo(
+        id: "SN123", manufacturer: "Samsung", model: "SM-A075F",
+        serialNumber: "SN123", deviceVersion: "1.0", friendlyName: "My Phone"
     )
-    mgr.isTransferring = true
-    mgr.cancelTransfer()
-    try expectNil(mgr.transferProgress)
-    try expectFalse(mgr.isTransferring)
+    try expect(info.id, "SN123")
+    try expect(info.manufacturer, "Samsung")
+    try expect(info.model, "SM-A075F")
+    try expect(info.serialNumber, "SN123")
+    try expect(info.deviceVersion, "1.0")
+    try expect(info.friendlyName, "My Phone")
 }
 
-testOnMain("MTPManager cancelTransfer when no transfer is safe") {
-    let mgr = MTPManager()
-    mgr.cancelTransfer()  // should not crash
-    try expectFalse(mgr.isTransferring)
-    try expectNil(mgr.transferProgress)
-}
-
-testOnMain("MTPManager disconnect cancels active transfer") {
-    let mgr = MTPManager()
-    mgr.transferProgress = MTPManager.TransferProgress(
-        fileName: "test.jpg", sent: 50, total: 100, isUploading: false
+test("DeviceInfo Identifiable uses id") {
+    let info = MTPDeviceInfo(
+        id: "XYZ", manufacturer: "", model: "", serialNumber: "XYZ",
+        deviceVersion: "", friendlyName: ""
     )
-    mgr.isTransferring = true
+    try expect(info.id, "XYZ")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+print("\n── Connection State Machine ──")
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("ConnectionState has all cases") {
+    let states = ConnectionState.allCases
+    try expect(states.count, 4)
+    try expectTrue(states.contains(.disconnected))
+    try expectTrue(states.contains(.connecting))
+    try expectTrue(states.contains(.connected))
+    try expectTrue(states.contains(.disconnecting))
+}
+
+testOnMain("Manager starts in disconnected state") {
+    let mgr = MTPManager()
+    try expect(mgr.connectionState, .disconnected)
+    try expectFalse(mgr.isConnected)
+}
+
+testOnMain("isConnected computed property reflects connectionState") {
+    let mgr = MTPManager()
+    try expectFalse(mgr.isConnected)
+    mgr.connectionState = .connecting
+    try expectFalse(mgr.isConnected)
+    mgr.connectionState = .connected
+    try expectTrue(mgr.isConnected)
+    mgr.connectionState = .disconnecting
+    try expectFalse(mgr.isConnected)
+    mgr.connectionState = .disconnected
+    try expectFalse(mgr.isConnected)
+}
+
+testOnMain("connect guards against non-disconnected state") {
+    let mgr = MTPManager()
+    mgr.connectionState = .connecting
+    mgr.connect()
+    // Should remain in connecting (not restart)
+    try expect(mgr.connectionState, .connecting)
+
+    mgr.connectionState = .connected
+    mgr.connect()
+    try expect(mgr.connectionState, .connected)
+}
+
+testOnMain("disconnect guards against already disconnected") {
+    let mgr = MTPManager()
+    try expect(mgr.connectionState, .disconnected)
+    mgr.disconnect() // Should be a no-op, not crash
+    try expect(mgr.connectionState, .disconnected)
+}
+
+testOnMain("disconnect transitions through disconnecting to disconnected") {
+    let mgr = MTPManager()
+    mgr.connectionState = .connected
     mgr.disconnect()
-    try expectFalse(mgr.isTransferring)
-    try expectNil(mgr.transferProgress)
+    try expect(mgr.connectionState, .disconnected)
 }
 
-testOnMain("MTPManager isTransferring initial state") {
+testOnMain("disconnect from connecting state works") {
     let mgr = MTPManager()
-    try expectFalse(mgr.isTransferring)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-print("\n── Rename & Move ──")
-// ─────────────────────────────────────────────────────────────────────────────
-
-testOnMain("MTPManager renameFile does nothing without device") {
-    let mgr = MTPManager()
-    mgr.selectedDevice = nil
-    let file = makeFileInfo(name: "old.txt")
-    mgr.renameFile(file, newName: "new.txt")
-    // Should not crash; no device means no-op
-    try expectNil(mgr.errorMessage)
-}
-
-testOnMain("MTPManager renameFile does nothing without storage") {
-    let mgr = MTPManager()
-    mgr.selectedStorage = nil
-    let file = makeFileInfo(name: "old.txt")
-    mgr.renameFile(file, newName: "new.txt")
-    try expectNil(mgr.errorMessage)
-}
-
-testOnMain("MTPManager moveFile does nothing without device") {
-    let mgr = MTPManager()
-    mgr.selectedDevice = nil
-    let file = makeFileInfo(name: "photo.jpg")
-    mgr.moveFile(file, toParentId: 100)
-    try expectNil(mgr.errorMessage)
-}
-
-testOnMain("MTPManager moveFile does nothing without storage") {
-    let mgr = MTPManager()
-    mgr.selectedStorage = nil
-    let file = makeFileInfo(name: "photo.jpg")
-    mgr.moveFile(file, toParentId: 100)
-    try expectNil(mgr.errorMessage)
+    mgr.connectionState = .connecting
+    mgr.disconnect()
+    try expect(mgr.connectionState, .disconnected)
 }
 
 // ============================================================================

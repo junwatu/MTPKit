@@ -1,13 +1,29 @@
 // MTPManager.swift — Async manager for SwiftUI, wraps MTPDevice
 import Foundation
 import Combine
+import AppKit
+
+/// File browser view mode
+public enum FileViewMode: String, CaseIterable {
+    case list
+    case grid
+}
+
+/// Connection state machine — prevents overlapping connect/disconnect operations
+public enum ConnectionState: String, CaseIterable {
+    case disconnected
+    case connecting
+    case connected
+    case disconnecting
+}
 
 /// Observable manager that drives the SwiftUI interface
 @MainActor
 public final class MTPManager: ObservableObject {
     // MARK: - Published State
 
-    @Published public var isConnected = false
+    @Published public var viewMode: FileViewMode = .list
+    @Published public var connectionState: ConnectionState = .disconnected
     @Published public var isLoading = false
     @Published public var devices: [MTPDevice] = []
     @Published public var selectedDevice: MTPDevice?
@@ -22,15 +38,35 @@ public final class MTPManager: ObservableObject {
     @Published public var transferProgress: TransferProgress?
     @Published public var isTransferring = false
     @Published public var isHotPlugEnabled = false
+    @Published public var thumbnails: [UInt32: NSImage] = [:]
+
+    /// Convenience — backwards compatible with views checking `isConnected`
+    public var isConnected: Bool {
+        get { connectionState == .connected }
+        set { connectionState = newValue ? .connected : .disconnected }
+    }
 
     /// The currently active transfer task (download or upload)
     private var activeTransferTask: Task<Void, Never>?
+
+    /// Object IDs that are currently being fetched or have already failed (no thumbnail available)
+    private var thumbnailPending: Set<UInt32> = []
 
     /// Cancellation token shared with the active transfer
     private nonisolated(unsafe) var transferCancellation: MTPCancellationToken?
 
     /// The USB hot-plug monitor instance
     private let usbMonitor = USBDeviceMonitor()
+
+    /// Pending auto-connect task (cancelled if a new USB event arrives)
+    private var autoConnectTask: Task<Void, Never>?
+
+    /// Set after manual disconnect to prevent auto-reconnect while USB is still plugged in.
+    /// Cleared when a USB disconnect event is detected (cable actually unplugged).
+    private var manuallyDisconnected = false
+
+    /// In-flight connect task — used to prevent overlapping connections
+    private var connectTask: Task<Void, Never>?
 
     public struct PathEntry: Equatable {
         public let path: String
@@ -76,27 +112,58 @@ public final class MTPManager: ObservableObject {
         guard !isHotPlugEnabled else { return }
         isHotPlugEnabled = true
 
+        usbMonitor.debounceInterval = 1.0
+
         usbMonitor.startMonitoring { [weak self] event in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 switch event {
                 case .deviceConnected:
-                    // Only auto-connect if not already connected
-                    if !self.isConnected {
-                        self.connect()
+                    // Only auto-connect if fully disconnected (not mid-transition)
+                    if self.connectionState == .disconnected && !self.manuallyDisconnected {
+                        // Cancel any pending connect attempt
+                        self.autoConnectTask?.cancel()
+                        // Delay to let MTP negotiation complete, then retry up to 3 times
+                        self.autoConnectTask = Task { [weak self] in
+                            for attempt in 1...3 {
+                                guard let self = self,
+                                      self.connectionState == .disconnected else { return }
+                                if Task.isCancelled { return }
+
+                                // Wait longer on each attempt (1s, 2s, 3s)
+                                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                                if Task.isCancelled { return }
+
+                                self.connect()
+
+                                // Give connect() time to finish
+                                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                                if self.connectionState == .connected { return }
+                            }
+                        }
                     }
                 case .deviceDisconnected:
-                    // Only auto-disconnect if currently connected
-                    if self.isConnected {
-                        // Try to re-detect; if no devices found, disconnect
-                        Task { [weak self] in
+                    // USB unplugged — clear manual disconnect flag so next plug-in auto-connects
+                    self.manuallyDisconnected = false
+                    if self.connectionState == .connected {
+                        // Delay briefly — composite devices fire multiple disconnect events
+                        self.autoConnectTask?.cancel()
+                        self.autoConnectTask = Task { [weak self] in
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            if Task.isCancelled { return }
+                            guard let self = self,
+                                  self.connectionState == .connected else { return }
+
+                            // Verify the device is truly gone — with 5s timeout to prevent hang
                             do {
-                                let devices = try await MTPDevice.detectDevicesAsync()
+                                let devices = try await MTPDevice.detectDevicesAsync(timeout: 5)
                                 if devices.isEmpty {
-                                    self?.disconnect()
+                                    self.disconnect()
                                 }
+                                // Release any devices we opened just to check
+                                for d in devices { d.releaseDevice() }
                             } catch {
-                                self?.disconnect()
+                                self.disconnect()
                             }
                         }
                     }
@@ -107,6 +174,8 @@ public final class MTPManager: ObservableObject {
 
     /// Stop monitoring USB device events.
     public func stopHotPlug() {
+        autoConnectTask?.cancel()
+        autoConnectTask = nil
         usbMonitor.stopMonitoring()
         isHotPlugEnabled = false
     }
@@ -150,13 +219,54 @@ public final class MTPManager: ObservableObject {
         }
     }
 
+    // MARK: - Thumbnails
+
+    /// File extensions that may have device-generated thumbnails
+    private static let thumbnailExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "gif", "bmp", "webp", "heic", "heif", "raw", "dng",
+        "mp4", "mov", "avi", "mkv", "wmv", "flv", "webm", "3gp"
+    ]
+
+    /// Returns true if the file is an image or video that may have a thumbnail
+    public static func isThumbnailable(_ file: MTPFileInfo) -> Bool {
+        !file.isDir && thumbnailExtensions.contains(file.fileExtension.lowercased())
+    }
+
+    /// Request a thumbnail for a file. Loads asynchronously and publishes to `thumbnails`.
+    /// Safe to call multiple times for the same object — deduplicates requests.
+    public func fetchThumbnail(for file: MTPFileInfo) {
+        guard MTPManager.isThumbnailable(file) else { return }
+        guard thumbnails[file.objectId] == nil else { return }
+        guard !thumbnailPending.contains(file.objectId) else { return }
+        guard let device = selectedDevice else { return }
+
+        thumbnailPending.insert(file.objectId)
+        let objectId = file.objectId
+
+        Task { [weak self] in
+            let data = await device.getThumbnailAsync(objectId: objectId)
+
+            guard let self = self else { return }
+            if let data = data, let image = NSImage(data: data) {
+                self.thumbnails[objectId] = image
+            }
+            // If nil, leave in thumbnailPending so we don't retry
+        }
+    }
+
     // MARK: - Connect / Disconnect
 
     public func connect() {
+        // Guard against overlapping connection attempts
+        guard connectionState == .disconnected else { return }
+        connectionState = .connecting
         errorMessage = nil
         isLoading = true
 
-        Task { [weak self] in
+        // Cancel any previous connect task
+        connectTask?.cancel()
+
+        connectTask = Task { [weak self] in
             if !MTPManager.initialized {
                 MTPDevice.initialize()
                 MTPManager.initialized = true
@@ -165,27 +275,58 @@ public final class MTPManager: ObservableObject {
             do {
                 let detectedDevices = try await MTPDevice.detectDevicesAsync()
 
-                self?.devices = detectedDevices
-                self?.selectedDevice = detectedDevices.first
-                self?.isConnected = true
-                self?.isLoading = false
+                guard let self = self else { return }
+                // Check we're still in connecting state (disconnect may have been called)
+                guard self.connectionState == .connecting else {
+                    // Release devices we just opened since we're no longer connecting
+                    for d in detectedDevices { d.releaseDevice() }
+                    return
+                }
+
+                self.devices = detectedDevices
+                self.selectedDevice = detectedDevices.first
+                self.connectionState = .connected
+                self.isLoading = false
 
                 if let device = detectedDevices.first {
-                    let info = await device.getDeviceInfoAsync()
-                    self?.deviceInfo = info
-                    await self?.fetchStorages()
+                    let info = try await device.getDeviceInfoAsync()
+                    self.deviceInfo = info
+                    await self.fetchStorages()
                 }
             } catch {
-                self?.errorMessage = error.localizedDescription
-                self?.isConnected = false
-                self?.isLoading = false
+                guard let self = self else { return }
+                self.connectionState = .disconnected
+                self.isLoading = false
+                if !self.handleDeviceError(error) {
+                    self.errorMessage = error.localizedDescription
+                }
             }
         }
     }
 
     public func disconnect() {
+        // Guard against overlapping disconnect or already disconnected
+        guard connectionState == .connected || connectionState == .connecting else { return }
+        connectionState = .disconnecting
+
+        // Prevent hot-plug from auto-reconnecting while USB is still plugged in
+        manuallyDisconnected = true
+        // Cancel any pending auto-connect/disconnect and in-flight connect
+        autoConnectTask?.cancel()
+        autoConnectTask = nil
+        connectTask?.cancel()
+        connectTask = nil
         // Cancel any active transfer before disconnecting
         cancelTransfer()
+
+        // Release device connections — releaseDevice() dispatches to background queue,
+        // so this won't block the main thread even if USB handle is stale
+        let devicesToRelease = devices
+        for device in devicesToRelease {
+            device.releaseDevice()
+        }
+
+        // Clear all state
         devices = []
         selectedDevice = nil
         deviceInfo = nil
@@ -195,8 +336,25 @@ public final class MTPManager: ObservableObject {
         currentPath = "/"
         currentParentId = MTPParentObjectID
         pathHistory = []
-        isConnected = false
+        connectionState = .disconnected
         errorMessage = nil
+        thumbnails = [:]
+        thumbnailPending = []
+    }
+
+    /// Check if an error indicates the device is gone and auto-disconnect if so.
+    /// Returns true if it was a disconnection error and the UI should stop the current flow.
+    @discardableResult
+    private func handleDeviceError(_ error: Error) -> Bool {
+        if let mtpError = error as? MTPError, mtpError == .deviceDisconnected {
+            // Only disconnect if we're in a state where it makes sense
+            if connectionState == .connected || connectionState == .connecting {
+                disconnect()
+            }
+            errorMessage = MTPError.deviceDisconnected.errorDescription
+            return true
+        }
+        return false
     }
 
     // MARK: - Fetch Storages
@@ -215,7 +373,9 @@ public final class MTPManager: ObservableObject {
                 await browse(storageId: storage.id, parentId: MTPParentObjectID, path: "/", name: "/")
             }
         } catch {
-            self.errorMessage = error.localizedDescription
+            if !handleDeviceError(error) {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -237,8 +397,10 @@ public final class MTPManager: ObservableObject {
             self.currentParentId = parentId
             self.isLoading = false
         } catch {
-            self.errorMessage = error.localizedDescription
             self.isLoading = false
+            if !handleDeviceError(error) {
+                self.errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -336,11 +498,12 @@ public final class MTPManager: ObservableObject {
             } catch let error as MTPError where error == .cancelled {
                 self?.transferProgress = nil
                 self?.isTransferring = false
-                // Cancelled — no error message
             } catch {
-                self?.errorMessage = "Download failed: \(error.localizedDescription)"
                 self?.transferProgress = nil
                 self?.isTransferring = false
+                if self?.handleDeviceError(error) != true {
+                    self?.errorMessage = "Download failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -420,7 +583,10 @@ public final class MTPManager: ObservableObject {
                             totalSent += fileSize
                         }
                     } catch let error as MTPError where error == .cancelled {
-                        break  // Cancelled — exit loop cleanly
+                        break
+                    } catch let error as MTPError where error == .deviceDisconnected {
+                        await MainActor.run { _ = self?.handleDeviceError(error) }
+                        return
                     } catch {
                         await MainActor.run {
                             self?.errorMessage = "Upload failed for \(fileName): \(error.localizedDescription)"
@@ -543,7 +709,9 @@ public final class MTPManager: ObservableObject {
                 let parentId = file.parentId
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                self?.errorMessage = "Delete failed: \(error.localizedDescription)"
+                if self?.handleDeviceError(error) != true {
+                    self?.errorMessage = "Delete failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -561,7 +729,9 @@ public final class MTPManager: ObservableObject {
                 let path = self?.currentPath ?? "/"
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                self?.errorMessage = "Create folder failed: \(error.localizedDescription)"
+                if self?.handleDeviceError(error) != true {
+                    self?.errorMessage = "Create folder failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -581,7 +751,9 @@ public final class MTPManager: ObservableObject {
                 let parentId = self?.currentParentId ?? MTPParentObjectID
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                self?.errorMessage = "Rename failed: \(error.localizedDescription)"
+                if self?.handleDeviceError(error) != true {
+                    self?.errorMessage = "Rename failed: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -605,7 +777,9 @@ public final class MTPManager: ObservableObject {
                 let parentId = self?.currentParentId ?? MTPParentObjectID
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
-                self?.errorMessage = "Move failed: \(error.localizedDescription)"
+                if self?.handleDeviceError(error) != true {
+                    self?.errorMessage = "Move failed: \(error.localizedDescription)"
+                }
             }
         }
     }

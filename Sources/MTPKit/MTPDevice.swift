@@ -3,10 +3,18 @@ import Foundation
 import CLibMTP
 
 /// Wraps an MTP device connection via libmtp
+///
+/// All operations are serialized through an internal dispatch queue to prevent
+/// concurrent libmtp calls, which are not thread-safe per-device.
 public final class MTPDevice: @unchecked Sendable {
     /// The raw libmtp device pointer
     private let device: UnsafeMutablePointer<LIBMTP_mtpdevice_t>
     private let lock = NSLock()
+    private var released = false
+
+    /// Serial queue for all libmtp operations on this device.
+    /// libmtp is not thread-safe — all calls for a given device must be serialized.
+    internal let operationQueue = DispatchQueue(label: "MTPKit.MTPDevice.operations")
 
     /// Private init — use `detectDevices()` to create instances
     private init(device: UnsafeMutablePointer<LIBMTP_mtpdevice_t>) {
@@ -14,7 +22,41 @@ public final class MTPDevice: @unchecked Sendable {
     }
 
     deinit {
-        LIBMTP_Release_Device(device)
+        lock.lock()
+        let alreadyReleased = released
+        lock.unlock()
+        if !alreadyReleased {
+            // Synchronous — must complete before dealloc finishes
+            operationQueue.sync {
+                LIBMTP_Release_Device(device)
+            }
+        }
+    }
+
+    /// Release the underlying device connection early.
+    /// After this call, all operations will throw `MTPError.deviceDisconnected`.
+    /// The actual USB release happens on the operation queue to avoid blocking the caller
+    /// (e.g. the main thread) if the USB handle is stale.
+    public func releaseDevice() {
+        lock.lock()
+        guard !released else {
+            lock.unlock()
+            return
+        }
+        released = true
+        lock.unlock()
+        // Capture device pointer before dispatching — safe because we own it
+        let dev = device
+        operationQueue.async {
+            LIBMTP_Release_Device(dev)
+        }
+    }
+
+    /// Check if device is still usable; throws if released
+    private func ensureConnected() throws {
+        if released {
+            throw MTPError.deviceDisconnected
+        }
     }
 
     // MARK: - Static: Initialize & Detect
@@ -64,9 +106,10 @@ public final class MTPDevice: @unchecked Sendable {
 
     // MARK: - Device Info
 
-    public func getDeviceInfo() -> MTPDeviceInfo {
+    public func getDeviceInfo() throws -> MTPDeviceInfo {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let manufacturer = getString(LIBMTP_Get_Manufacturername(device))
         let model = getString(LIBMTP_Get_Modelname(device))
@@ -90,6 +133,7 @@ public final class MTPDevice: @unchecked Sendable {
     public func getStorages() throws -> [MTPStorageInfo] {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let ret = LIBMTP_Get_Storage(device, Int32(LIBMTP_STORAGE_SORTBY_NOTSORTED))
         if ret != 0 {
@@ -131,6 +175,7 @@ public final class MTPDevice: @unchecked Sendable {
     public func listDirectory(storageId: UInt32, parentId: UInt32, parentPath: String = "") throws -> [MTPFileInfo] {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let fileList = LIBMTP_Get_Files_And_Folders(device, storageId, parentId)
 
@@ -192,6 +237,7 @@ public final class MTPDevice: @unchecked Sendable {
     ) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         // Use callback with context for progress reporting
         let context = ProgressContext(callback: progress)
@@ -257,6 +303,7 @@ public final class MTPDevice: @unchecked Sendable {
     ) throws -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let fm = FileManager.default
         guard fm.fileExists(atPath: localPath) else {
@@ -327,6 +374,7 @@ public final class MTPDevice: @unchecked Sendable {
     ) throws -> UInt32 {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let nameCStr = strdup(name)
         defer { free(nameCStr) }
@@ -347,6 +395,7 @@ public final class MTPDevice: @unchecked Sendable {
     public func deleteObject(objectId: UInt32) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let ret = LIBMTP_Delete_Object(device, objectId)
         if ret != 0 {
@@ -365,6 +414,7 @@ public final class MTPDevice: @unchecked Sendable {
     public func renameObject(objectId: UInt32, newName: String) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let nameCStr = strdup(newName)
         defer { free(nameCStr) }
@@ -387,12 +437,41 @@ public final class MTPDevice: @unchecked Sendable {
     public func moveObject(objectId: UInt32, storageId: UInt32, newParentId: UInt32) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ensureConnected()
 
         let ret = LIBMTP_Move_Object(device, objectId, storageId, newParentId)
         if ret != 0 {
             let errMsg = drainErrorStack(device) ?? "Unknown error"
             throw MTPError.fileTransferError("Move failed: \(errMsg)")
         }
+    }
+
+    // MARK: - Thumbnail
+
+    /// Fetch the device-generated thumbnail for an object (typically JPEG).
+    ///
+    /// Returns `nil` if the device does not have a thumbnail for this object.
+    /// Most Android devices generate thumbnails for images and videos taken
+    /// with the camera.
+    public func getThumbnail(objectId: UInt32) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !released else { return nil }
+
+        var dataPtr: UnsafeMutablePointer<UInt8>?
+        var size: UInt32 = 0
+
+        let ret = LIBMTP_Get_Thumbnail(device, objectId, &dataPtr, &size)
+
+        guard ret == 0, let ptr = dataPtr, size > 0 else {
+            // No thumbnail available — clear error stack silently
+            LIBMTP_Clear_Errorstack(device)
+            return nil
+        }
+
+        let data = Data(bytes: ptr, count: Int(size))
+        free(ptr)
+        return data
     }
 
     // MARK: - Recursive Walk
@@ -498,6 +577,32 @@ public final class MTPDevice: @unchecked Sendable {
 
                 state.pInfo.filesSent += 1
                 state.pInfo.filesSentProgress = mtpPercent(Float(state.pInfo.filesSent), Float(state.pInfo.totalFiles))
+            }
+        }
+    }
+
+    // MARK: - Serialized Execution
+
+    /// Execute a blocking libmtp operation on the serial operation queue.
+    /// This ensures all operations for this device are serialized and off the calling thread.
+    internal func serialized<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            operationQueue.async {
+                do {
+                    let result = try work()
+                    continuation.resume(returning: result)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Non-throwing variant for operations that return optional values
+    internal func serializedOptional<T>(_ work: @escaping () -> T?) async -> T? {
+        await withCheckedContinuation { continuation in
+            operationQueue.async {
+                continuation.resume(returning: work())
             }
         }
     }
