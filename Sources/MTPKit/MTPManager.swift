@@ -2,6 +2,7 @@
 import Foundation
 import Combine
 import AppKit
+import os
 
 /// File browser view mode
 public enum FileViewMode: String, CaseIterable {
@@ -111,6 +112,7 @@ public final class MTPManager: ObservableObject {
     public func startHotPlug() {
         guard !isHotPlugEnabled else { return }
         isHotPlugEnabled = true
+        MTPLog.hotPlug.info("Hot-plug monitoring started")
 
         usbMonitor.debounceInterval = 1.0
 
@@ -119,6 +121,7 @@ public final class MTPManager: ObservableObject {
                 guard let self = self else { return }
                 switch event {
                 case .deviceConnected:
+                    MTPLog.hotPlug.info("USB device connected — state=\(self.connectionState.rawValue, privacy: .public), manuallyDisconnected=\(self.manuallyDisconnected, privacy: .public)")
                     // Only auto-connect if fully disconnected (not mid-transition)
                     if self.connectionState == .disconnected && !self.manuallyDisconnected {
                         // Cancel any pending connect attempt
@@ -143,6 +146,7 @@ public final class MTPManager: ObservableObject {
                         }
                     }
                 case .deviceDisconnected:
+                    MTPLog.hotPlug.info("USB device disconnected — state=\(self.connectionState.rawValue, privacy: .public)")
                     // USB unplugged — clear manual disconnect flag so next plug-in auto-connects
                     self.manuallyDisconnected = false
                     if self.connectionState == .connected {
@@ -258,7 +262,11 @@ public final class MTPManager: ObservableObject {
 
     public func connect() {
         // Guard against overlapping connection attempts
-        guard connectionState == .disconnected else { return }
+        guard connectionState == .disconnected else {
+            MTPLog.state.notice("connect() ignored — state=\(self.connectionState.rawValue, privacy: .public)")
+            return
+        }
+        MTPLog.state.info("Connecting... (state: disconnected → connecting)")
         connectionState = .connecting
         errorMessage = nil
         isLoading = true
@@ -287,16 +295,26 @@ public final class MTPManager: ObservableObject {
                 self.selectedDevice = detectedDevices.first
                 self.connectionState = .connected
                 self.isLoading = false
+                MTPLog.state.info("Connected — \(detectedDevices.count, privacy: .public) device(s) (state: connecting → connected)")
 
                 if let device = detectedDevices.first {
                     let info = try await device.getDeviceInfoAsync()
                     self.deviceInfo = info
+                    MTPLog.device.info("Device: \(info.manufacturer, privacy: .public) \(info.model, privacy: .public) (serial: \(info.serialNumber, privacy: .public))")
                     await self.fetchStorages()
                 }
             } catch {
                 guard let self = self else { return }
-                self.connectionState = .disconnected
-                self.isLoading = false
+                MTPLog.state.error("Connect failed (state=\(self.connectionState.rawValue, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+                // If we already moved to .connected (e.g. getDeviceInfo/fetchStorages failed),
+                // do a full disconnect to release devices properly
+                if self.connectionState == .connected {
+                    self.manuallyDisconnected = false
+                    self.disconnect()
+                } else {
+                    self.connectionState = .disconnected
+                    self.isLoading = false
+                }
                 if !self.handleDeviceError(error) {
                     self.errorMessage = error.localizedDescription
                 }
@@ -306,7 +324,11 @@ public final class MTPManager: ObservableObject {
 
     public func disconnect() {
         // Guard against overlapping disconnect or already disconnected
-        guard connectionState == .connected || connectionState == .connecting else { return }
+        guard connectionState == .connected || connectionState == .connecting else {
+            MTPLog.state.notice("disconnect() ignored — state=\(self.connectionState.rawValue, privacy: .public)")
+            return
+        }
+        MTPLog.state.info("Disconnecting... (state: \(self.connectionState.rawValue, privacy: .public) → disconnecting)")
         connectionState = .disconnecting
 
         // Prevent hot-plug from auto-reconnecting while USB is still plugged in
@@ -340,6 +362,7 @@ public final class MTPManager: ObservableObject {
         errorMessage = nil
         thumbnails = [:]
         thumbnailPending = []
+        MTPLog.state.info("Disconnected (state: disconnecting → disconnected)")
     }
 
     /// Check if an error indicates the device is gone and auto-disconnect if so.
@@ -347,6 +370,7 @@ public final class MTPManager: ObservableObject {
     @discardableResult
     private func handleDeviceError(_ error: Error) -> Bool {
         if let mtpError = error as? MTPError, mtpError == .deviceDisconnected {
+            MTPLog.device.error("Device disconnected error detected — state=\(self.connectionState.rawValue, privacy: .public)")
             // Only disconnect if we're in a state where it makes sense
             if connectionState == .connected || connectionState == .connecting {
                 disconnect()
@@ -384,6 +408,7 @@ public final class MTPManager: ObservableObject {
     public func browse(storageId: UInt32, parentId: UInt32, path: String, name: String) async {
         guard let device = selectedDevice else { return }
 
+        MTPLog.fileOps.info("Browsing: path=\(path, privacy: .public), parentId=\(parentId, privacy: .public), storageId=\(storageId, privacy: .public)")
         self.isLoading = true
 
         do {
@@ -396,6 +421,7 @@ public final class MTPManager: ObservableObject {
             self.currentPath = path
             self.currentParentId = parentId
             self.isLoading = false
+            MTPLog.fileOps.info("Browse complete: \(files.count, privacy: .public) items at \(path, privacy: .public)")
         } catch {
             self.isLoading = false
             if !handleDeviceError(error) {
@@ -704,9 +730,10 @@ public final class MTPManager: ObservableObject {
             do {
                 try await device.deleteObject(objectId: file.objectId)
 
-                // Refresh
+                // Refresh — use currentParentId, NOT file.parentId
+                // (Samsung root items have parentId=0, but browse() needs 0xFFFFFFFF)
                 let path = self?.currentPath ?? "/"
-                let parentId = file.parentId
+                let parentId = self?.currentParentId ?? MTPParentObjectID
                 await self?.browse(storageId: storage.id, parentId: parentId, path: path, name: "")
             } catch {
                 if self?.handleDeviceError(error) != true {

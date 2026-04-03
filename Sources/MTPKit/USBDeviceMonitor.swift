@@ -2,6 +2,7 @@
 import Foundation
 import IOKit
 import IOKit.usb
+import os
 
 /// Monitors USB device connect/disconnect events in real-time via IOKit notifications.
 ///
@@ -241,9 +242,13 @@ public final class USBDeviceMonitor: @unchecked Sendable {
         drainIterator(addedIterator)
 
         let now = CFAbsoluteTimeGetCurrent()
-        guard (now - lastConnectTime) > debounceInterval else { return }
+        guard (now - lastConnectTime) > debounceInterval else {
+            MTPLog.hotPlug.debug("USB connect debounced (within \(self.debounceInterval)s)")
+            return
+        }
         lastConnectTime = now
 
+        MTPLog.hotPlug.info("IOKit: USB device connected")
         lock.lock()
         let h = handler
         lock.unlock()
@@ -254,9 +259,13 @@ public final class USBDeviceMonitor: @unchecked Sendable {
         drainIterator(removedIterator)
 
         let now = CFAbsoluteTimeGetCurrent()
-        guard (now - lastDisconnectTime) > debounceInterval else { return }
+        guard (now - lastDisconnectTime) > debounceInterval else {
+            MTPLog.hotPlug.debug("USB disconnect debounced (within \(self.debounceInterval)s)")
+            return
+        }
         lastDisconnectTime = now
 
+        MTPLog.hotPlug.info("IOKit: USB device disconnected")
         lock.lock()
         let h = handler
         lock.unlock()

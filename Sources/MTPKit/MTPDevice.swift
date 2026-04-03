@@ -1,6 +1,7 @@
 // MTPDevice.swift — Core device wrapper over libmtp
 import Foundation
 import CLibMTP
+import os
 
 /// Wraps an MTP device connection via libmtp
 ///
@@ -41,14 +42,17 @@ public final class MTPDevice: @unchecked Sendable {
         lock.lock()
         guard !released else {
             lock.unlock()
+            MTPLog.device.debug("releaseDevice() called but already released")
             return
         }
         released = true
         lock.unlock()
+        MTPLog.device.info("Releasing MTP device (dispatched to operation queue)")
         // Capture device pointer before dispatching — safe because we own it
         let dev = device
         operationQueue.async {
             LIBMTP_Release_Device(dev)
+            MTPLog.device.info("MTP device released (USB handle freed)")
         }
     }
 
@@ -63,11 +67,13 @@ public final class MTPDevice: @unchecked Sendable {
 
     /// Initialize libmtp (call once at app start)
     public static func initialize() {
+        MTPLog.device.info("Initializing libmtp")
         LIBMTP_Init()
     }
 
     /// Detect all connected MTP devices
     public static func detectDevices() throws -> [MTPDevice] {
+        MTPLog.device.info("Detecting raw MTP devices...")
         var rawDevices: UnsafeMutablePointer<LIBMTP_raw_device_struct>?
         var numDevices: Int32 = 0
 
@@ -76,31 +82,58 @@ public final class MTPDevice: @unchecked Sendable {
         guard err == LIBMTP_ERROR_NONE else {
             switch err {
             case LIBMTP_ERROR_NO_DEVICE_ATTACHED:
+                MTPLog.device.notice("No MTP devices attached")
                 throw MTPError.noDevicesFound
             default:
+                MTPLog.device.error("Raw device detection failed with code \(err.rawValue)")
                 throw MTPError.detectFailed("Error code: \(err.rawValue)")
             }
         }
 
         guard let rawDevices = rawDevices, numDevices > 0 else {
+            MTPLog.device.notice("No MTP devices found (empty list)")
             throw MTPError.noDevicesFound
         }
 
         defer { free(rawDevices) }
 
+        MTPLog.device.info("Found \(numDevices) raw device(s), opening...")
         var devices: [MTPDevice] = []
         for i in 0..<Int(numDevices) {
+            let raw = rawDevices[i]
+            let vendorId = raw.device_entry.vendor_id
+            let productId = raw.device_entry.product_id
+            let vendor = String(cString: raw.device_entry.vendor)
+            let product = String(cString: raw.device_entry.product)
+            let busNo = raw.bus_location
+            let devNo = raw.devnum
+            MTPLog.device.info("Raw device[\(i, privacy: .public)]: \(vendor, privacy: .public) \(product, privacy: .public) (vid=\(vendorId, privacy: .public), pid=\(productId, privacy: .public), bus=\(busNo, privacy: .public), dev=\(devNo, privacy: .public))")
+
             // Use uncached mode — critical for Samsung devices with many files
             guard let dev = LIBMTP_Open_Raw_Device_Uncached(&rawDevices[i]) else {
+                MTPLog.device.error("Failed to open raw device[\(i, privacy: .public)]: \(vendor, privacy: .public) \(product, privacy: .public) — USB interface may be claimed by another process or device not in MTP mode")
                 continue
             }
+            MTPLog.device.info("Opened MTP device[\(i, privacy: .public)]: \(vendor, privacy: .public) \(product, privacy: .public)")
             devices.append(MTPDevice(device: dev))
         }
 
         if devices.isEmpty {
-            throw MTPError.deviceOpenFailed("Could not open any detected devices. Make sure no other app (e.g. Android File Transfer) is using the device.")
+            MTPLog.device.error("All \(numDevices) raw device(s) failed to open")
+
+            // Check if ptpcamerad is claiming the USB interface
+            let ptpcameraRunning = Self.isProcessRunning("ptpcamerad")
+            let hint: String
+            if ptpcameraRunning {
+                MTPLog.device.error("ptpcamerad is running — likely claiming the USB device")
+                hint = "macOS 'ptpcamerad' is blocking the USB connection. Go to System Settings → General → Login Items & Extensions → Extensions → Image Capture → Disable the extension, then unplug and re-plug your device. Alternatively, run: killall ptpcamerad"
+            } else {
+                hint = "Make sure no other app (e.g. Android File Transfer) is using the device, and that USB mode is set to 'File transfer / MTP'."
+            }
+            throw MTPError.deviceOpenFailed(hint)
         }
 
+        MTPLog.device.info("Successfully opened \(devices.count) MTP device(s)")
         return devices
     }
 
@@ -110,6 +143,7 @@ public final class MTPDevice: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try ensureConnected()
+        MTPLog.device.debug("Getting device info")
 
         let manufacturer = getString(LIBMTP_Get_Manufacturername(device))
         let model = getString(LIBMTP_Get_Modelname(device))
@@ -137,11 +171,14 @@ public final class MTPDevice: @unchecked Sendable {
 
         let ret = LIBMTP_Get_Storage(device, Int32(LIBMTP_STORAGE_SORTBY_NOTSORTED))
         if ret != 0 {
+            MTPLog.device.notice("Storage fetch failed, retrying (Samsung workaround)...")
             // Samsung devices sometimes need a retry
             Thread.sleep(forTimeInterval: 0.5)
             let ret2 = LIBMTP_Get_Storage(device, Int32(LIBMTP_STORAGE_SORTBY_NOTSORTED))
             if ret2 != 0 {
-                throw MTPError.storageInfoError(drainErrorStack(device) ?? "Unknown error")
+                let errMsg = drainErrorStack(device) ?? "Unknown error"
+                MTPLog.device.error("Storage fetch failed after retry: \(errMsg)")
+                throw MTPError.storageInfoError(errMsg)
             }
         }
 
@@ -177,6 +214,7 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.fileOps.debug("Listing directory: storageId=\(storageId), parentId=\(parentId), path=\(parentPath)")
         let fileList = LIBMTP_Get_Files_And_Folders(device, storageId, parentId)
 
         var results: [MTPFileInfo] = []
@@ -238,6 +276,7 @@ public final class MTPDevice: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         try ensureConnected()
+        MTPLog.transfer.info("Downloading objectId=\(objectId) to \(destinationPath)")
 
         // Use callback with context for progress reporting
         let context = ProgressContext(callback: progress)
@@ -267,13 +306,16 @@ public final class MTPDevice: @unchecked Sendable {
 
         if ret != 0 {
             if context.wasCancelled {
+                MTPLog.transfer.notice("Download cancelled for objectId=\(objectId)")
                 // Clean up partial download
                 try? FileManager.default.removeItem(atPath: destinationPath)
                 throw MTPError.cancelled
             }
             let errMsg = drainErrorStack(device) ?? "Unknown download error"
+            MTPLog.transfer.error("Download failed for objectId=\(objectId): \(errMsg)")
             throw MTPError.fileTransferError(errMsg)
         }
+        MTPLog.transfer.info("Download complete for objectId=\(objectId)")
     }
 
     /// Download a file and restore its modification timestamp
@@ -305,8 +347,10 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.transfer.info("Uploading \(localPath) to parentId=\(parentId), storageId=\(storageId)")
         let fm = FileManager.default
         guard fm.fileExists(atPath: localPath) else {
+            MTPLog.transfer.error("Local file not found: \(localPath)")
             throw MTPError.localFileError("Local file not found: \(localPath)")
         }
 
@@ -355,12 +399,15 @@ public final class MTPDevice: @unchecked Sendable {
 
         if ret != 0 {
             if context.wasCancelled {
+                MTPLog.transfer.notice("Upload cancelled for \(localPath)")
                 throw MTPError.cancelled
             }
             let errMsg = drainErrorStack(device) ?? "Unknown upload error"
+            MTPLog.transfer.error("Upload failed for \(localPath): \(errMsg)")
             throw MTPError.sendObjectError(errMsg)
         }
 
+        MTPLog.transfer.info("Upload complete: \(localPath) → objectId=\(newFile.pointee.item_id)")
         return newFile.pointee.item_id
     }
 
@@ -376,6 +423,7 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.fileOps.info("Creating folder '\(name)' in parentId=\(parentId)")
         let nameCStr = strdup(name)
         defer { free(nameCStr) }
 
@@ -383,9 +431,11 @@ public final class MTPDevice: @unchecked Sendable {
 
         if folderId == 0 {
             let errMsg = drainErrorStack(device) ?? "Unknown error"
+            MTPLog.fileOps.error("Create folder failed for '\(name)': \(errMsg)")
             throw MTPError.sendObjectError("Failed to create folder '\(name)': \(errMsg)")
         }
 
+        MTPLog.fileOps.info("Created folder '\(name)' → folderId=\(folderId)")
         return folderId
     }
 
@@ -397,11 +447,14 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.fileOps.info("Deleting objectId=\(objectId)")
         let ret = LIBMTP_Delete_Object(device, objectId)
         if ret != 0 {
             let errMsg = drainErrorStack(device) ?? "Unknown error"
+            MTPLog.fileOps.error("Delete failed for objectId=\(objectId): \(errMsg)")
             throw MTPError.fileTransferError("Delete failed: \(errMsg)")
         }
+        MTPLog.fileOps.info("Deleted objectId=\(objectId)")
     }
 
     // MARK: - Rename
@@ -416,14 +469,17 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.fileOps.info("Renaming objectId=\(objectId) to '\(newName)'")
         let nameCStr = strdup(newName)
         defer { free(nameCStr) }
 
         let ret = LIBMTP_Set_Object_Filename(device, objectId, nameCStr)
         if ret != 0 {
             let errMsg = drainErrorStack(device) ?? "Unknown error"
+            MTPLog.fileOps.error("Rename failed for objectId=\(objectId): \(errMsg)")
             throw MTPError.fileTransferError("Rename failed: \(errMsg)")
         }
+        MTPLog.fileOps.info("Renamed objectId=\(objectId) → '\(newName)'")
     }
 
     // MARK: - Move
@@ -439,11 +495,14 @@ public final class MTPDevice: @unchecked Sendable {
         defer { lock.unlock() }
         try ensureConnected()
 
+        MTPLog.fileOps.info("Moving objectId=\(objectId) to parentId=\(newParentId)")
         let ret = LIBMTP_Move_Object(device, objectId, storageId, newParentId)
         if ret != 0 {
             let errMsg = drainErrorStack(device) ?? "Unknown error"
+            MTPLog.fileOps.error("Move failed for objectId=\(objectId): \(errMsg)")
             throw MTPError.fileTransferError("Move failed: \(errMsg)")
         }
+        MTPLog.fileOps.info("Moved objectId=\(objectId) → parentId=\(newParentId)")
     }
 
     // MARK: - Thumbnail
@@ -578,6 +637,25 @@ public final class MTPDevice: @unchecked Sendable {
                 state.pInfo.filesSent += 1
                 state.pInfo.filesSentProgress = mtpPercent(Float(state.pInfo.filesSent), Float(state.pInfo.totalFiles))
             }
+        }
+    }
+
+    // MARK: - Process Detection
+
+    /// Check if a process with the given name is currently running
+    private static func isProcessRunning(_ name: String) -> Bool {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-x", name]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 
